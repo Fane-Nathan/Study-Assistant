@@ -1,0 +1,25 @@
+# requirements.txt
+tensorflow
+sentence-transformers
+arxiv
+semanticscholar
+scikit-learn
+numpy
+rank_bm25
+nltk
+requests
+beautifulsoup4
+trafilatura
+python-dotenv
+huggingface_hub # Added huggingface_hub for Hugging Face models
+PyPDF2
+tenacity
+groq # Added groq if you use Groq API
+fastapi[all]
+uvicorn[standard] # Added uvicorn separately for clarity if needed later
+PyMuPDF
+google-cloud-aiplatform
+google-generativeai
+# Consider pinning versions for better reproducibility
+
+# streamlit # For UI based applications

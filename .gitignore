@@ -1,0 +1,26 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.venv/
+ENV/
+env/
+
+# Secrets
+.env
+*.env
+
+# Data files (Uncomment if you don't want to track generated data in Git)
+# data_hybrid/
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+.qodo
