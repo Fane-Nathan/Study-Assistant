@@ -18,7 +18,8 @@ import textwrap
 
 # --- Add NLTK data path ---
 # Ensure NLTK looks for data in the bundled directory first
-nltk_data_dir = os.path.join(os.path.dirname(__file__), '..', 'nltk_data') # Assumes nltk_data is in project root
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+nltk_data_dir = os.path.join(project_root, 'nltk_data')
 if os.path.exists(nltk_data_dir):
     nltk.data.path.append(nltk_data_dir)
     print(f"INFO: Appended NLTK data path: {nltk_data_dir}") # Add print/log for confirmation
