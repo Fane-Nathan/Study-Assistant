@@ -9,27 +9,20 @@ import argparse
 import logging
 import ssl
 import os
-# from turtle import st # Incorrect import, remove
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # Suppress TensorFlow INFO messages
 import sys
 import arxiv
-import nltk # Import nltk for data check
+import nltk
 import numpy as np
 from typing import Optional, Tuple, List, Dict, Any, Union
 import textwrap
-import traceback # Keep traceback import if used elsewhere, otherwise optional
+import traceback
 
-# --- REMOVE NLTK Download/Path Append Blocks from here ---
-# The Streamlit download block using st.* should NOT be here.
-# The nltk.data.path.append block for bundling should also be removed
-# if using the runtime download approach in app.py.
-# ---
-
-# --- Define logger at Module Level ---
-logger = logging.getLogger(__name__)
+# --- Logger Setup ---
+logger = logging.getLogger(__name__) # Use 'cli' as logger name
 
 # --- Path Setup ---
-# Add project root to sys.path to allow absolute imports from hybrid_search_rag package
+# Add project root to sys.path to allow imports from hybrid_search_rag package
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 if project_root not in sys.path:
@@ -37,94 +30,72 @@ if project_root not in sys.path:
 # --- End Path Setup ---
 
 
-# --- Import Project Modules (Order matters sometimes) ---
+# --- Project Module Imports ---
 try:
     from hybrid_search_rag import config
     from hybrid_search_rag.data.resource_fetcher import fetch_arxiv_papers, crawl_and_fetch_web_articles
-    # Ensure this points to the correct embedding model
     from hybrid_search_rag.retrieval.embedding_model_gemini import EmbeddingModel
     from hybrid_search_rag.data.data_manager import DataManager
-    # Ensure this points to the correct recommender
     from hybrid_search_rag.retrieval.recommender import Recommender, tokenize_text
     from rank_bm25 import BM25Okapi
     from hybrid_search_rag.llm.llm_interface import get_llm_response
 except ImportError as e:
-    # Logger might not be configured yet if basicConfig fails below,
-    # so use print for critical import errors
-    print(f"CRITICAL: Failed to import project modules: {e}", file=sys.stderr)
-    print("CRITICAL: Ensure you are running this script relative to the project root", file=sys.stderr)
-    print(f"CRITICAL: Current sys.path includes: {sys.path}", file=sys.stderr)
+    # Use print for critical import errors as logger might not be configured yet
+    print(f"ERROR: Failed to import project modules: {e}", file=sys.stderr)
+    print(f"Ensure you are running from the project root or the path setup is correct.", file=sys.stderr)
+    print(f"Current sys.path: {sys.path}", file=sys.stderr)
     sys.exit(1)
-# --- End Import Project Modules ---
+# --- End Project Module Imports ---
 
 
-# --- NLTK Data Check (for CLI execution) ---
-# This function is for when running from the command line
+# --- NLTK Data Check ---
 def check_nltk_data():
-    """Checks required NLTK data. Exits if missing after download attempt."""
+    """Checks required NLTK data ('punkt', 'stopwords'). Exits if missing after download attempt."""
     required_data = {'punkt': 'tokenizers/punkt', 'stopwords': 'corpora/stopwords'}
-    missing_data = []
-    for name, path in required_data.items():
-        try:
-            nltk.data.find(path)
-        except LookupError:
-            missing_data.append(name)
+    missing_data = [name for name, path in required_data.items() if not nltk.data.find(path, quiet=True)]
 
     if missing_data:
-        # Attempt download only if running as CLI script
-        logger.warning(f"NLTK data packages missing: {', '.join(missing_data)}.")
+        logger.warning(f"Missing NLTK data packages: {', '.join(missing_data)}.")
+        # Attempt download only when run as script
         print(f"\nAttempting to download missing NLTK data: {', '.join(missing_data)}...", file=sys.stderr)
         try:
-            # Add SSL context bypass for CLI download attempt as well
+            # Bypass SSL verification if needed for download
             try:
                 _create_unverified_https_context = ssl._create_unverified_context
-            except AttributeError:
-                pass
-            else:
-                ssl._create_default_https_context = _create_unverified_https_context
+            except AttributeError: pass
+            else: ssl._create_default_https_context = _create_unverified_https_context
 
             for name in missing_data:
-                print(f"Downloading NLTK package: {name}") # More verbose for CLI
-                if nltk.download(name, quiet=False): # Show download progress
+                print(f"Downloading NLTK package: {name}")
+                if nltk.download(name, quiet=False): # Show download progress for CLI
                     logger.info(f"Successfully downloaded NLTK data '{name}'.")
-                    # Re-verify after download
-                    try:
-                         nltk.data.find(required_data[name])
+                    # Verify after download
+                    try: nltk.data.find(required_data[name])
                     except LookupError:
-                         logger.error(f"Verification failed after downloading '{name}'. Exiting.")
-                         sys.exit(1) # Exit CLI if download fails verification
+                        logger.error(f"Verification failed after downloading '{name}'. Exiting.")
+                        sys.exit(1)
                 else:
                     logger.error(f"Failed to download NLTK data '{name}'. Exiting.")
-                    sys.exit(1) # Exit CLI if download fails
+                    sys.exit(1)
         except Exception as e:
             logger.error(f"An error occurred during NLTK download: {e}", exc_info=True)
-            print("\nAutomatic NLTK download failed. Please try manually in a Python interpreter:", file=sys.stderr)
-            print(">>> import nltk", file=sys.stderr)
-            for name in missing_data: print(f">>> nltk.download('{name}')", file=sys.stderr)
-            sys.exit(1) # Exit CLI if download fails
-    else:
-        # Only log if running verbosely perhaps, or just skip
-        # logger.info("Required NLTK data packages found.")
-        pass # Data found, no action needed for CLI
+            print("\nAutomatic NLTK download failed. Please try manually:", file=sys.stderr)
+            print(">>> import nltk")
+            for name in missing_data: print(f">>> nltk.download('{name}')")
+            sys.exit(1)
+    # else: # No need to log if data is found unless verbose logging is on
+    #    logger.info("Required NLTK data packages found.")
 
-# --- Chunking Helper Function Definition ---
-# (chunk_text_by_sentences function remains the same)
+# --- Text Chunking ---
 def chunk_text_by_sentences(text: str, sentences_per_chunk: int = 5, overlap_sentences: int = 1) -> List[str]:
-    """Splits text into chunks based on sentences with overlap."""
-    if not text:
-        return []
-
+    """Splits text into chunks by sentences with overlap."""
+    if not text: return []
     try:
-        # Ensure NLTK punkt tokenizer is available (checked globally by check_nltk_data)
         sentences = nltk.sent_tokenize(text)
     except Exception as e:
-        # Use the script's logger instance
-        logger.warning(f"Sentence tokenization failed: {e}. Falling back to basic newline split.")
-        # Basic fallback: split by paragraph or line, less ideal
+        logger.warning(f"Sentence tokenization failed: {e}. Falling back to newline split.")
         sentences = [p.strip() for p in text.split('\n\n') if p.strip()]
-        if not sentences:
-             sentences = [p.strip() for p in text.split('\n') if p.strip()]
-
+        if not sentences: sentences = [p.strip() for p in text.split('\n') if p.strip()]
     if not sentences:
         logger.warning("Could not extract sentences or lines for chunking.")
         return []
@@ -134,337 +105,246 @@ def chunk_text_by_sentences(text: str, sentences_per_chunk: int = 5, overlap_sen
     while start_index < len(sentences):
         end_index = min(start_index + sentences_per_chunk, len(sentences))
         chunk_sentences = sentences[start_index:end_index]
-        chunks.append(" ".join(chunk_sentences)) # Join sentences in chunk with space
-
-        # Move start index for next chunk, considering overlap
-        step = sentences_per_chunk - overlap_sentences
-        if step <= 0: # Ensure progression even with large overlap
-            step = 1
+        chunks.append(" ".join(chunk_sentences))
+        step = max(1, sentences_per_chunk - overlap_sentences) # Ensure step is at least 1
         start_index += step
-
     return chunks
-# --- END Chunking Helper Function Definition ---
+# --- End Text Chunking ---
 
-
-# --- Core Application Logic ---
-# (load_components function remains the same)
+# --- Global Variables for Loaded Components ---
+# Cache loaded components globally within the script's execution context
 loaded_metadata: Optional[List[Dict[str, Any]]] = None
 loaded_embeddings: Optional[np.ndarray] = None
 loaded_bm25_index: Optional[BM25Okapi] = None
 loaded_recommender: Optional[Recommender] = None
 
+# --- Component Loading ---
 def load_components(force_reload: bool = False):
-    """Loads data and initializes recommender, caching them globally."""
+    """Loads data (metadata, embeddings, index) and initializes recommender."""
     global loaded_metadata, loaded_embeddings, loaded_bm25_index, loaded_recommender
-
     if force_reload or loaded_metadata is None or loaded_recommender is None:
-        logger.info(f"{'Forcing reload' if force_reload else 'Loading components'}...")
+        logger.info(f"{'Forcing reload' if force_reload else 'Loading core components'}...")
         data_manager = DataManager(config.DATA_DIR, config.METADATA_FILE, config.EMBEDDINGS_FILE, config.BM25_INDEX_FILE)
         loaded_metadata, loaded_embeddings, loaded_bm25_index = data_manager.load_all_data()
 
         if loaded_metadata is None:
-            logger.error("Metadata failed to load. Cannot proceed.")
-            raise RuntimeError("Metadata loading failed.")
+            logger.error("Metadata loading failed. Cannot initialize recommender.")
+            raise RuntimeError("Metadata loading failed. Run the 'fetch' command first.")
 
         try:
-            # Ensure EmbeddingModel uses the correct model name from config if needed
-            embedder = EmbeddingModel(config.EMBEDDING_MODEL_NAME)
+            embedder = EmbeddingModel(config.EMBEDDING_MODEL_NAME) # Assumes config.EMBEDDING_MODEL_NAME is correct
             loaded_recommender = Recommender(embed_model=embedder)
             logger.info("Recommender initialized.")
         except Exception as e:
-            logger.error(f"Failed to initialize Recommender: {e}", exc_info=True)
+            logger.error(f"Recommender initialization failed: {e}", exc_info=True)
             loaded_recommender = None
             raise RuntimeError("Recommender initialization failed.") from e
 
-        # Log status of optional components
-        if loaded_embeddings is None: logger.warning("Embeddings missing; semantic search disabled.")
-        if loaded_bm25_index is None: logger.warning("BM25 index missing; keyword search disabled.")
+        if loaded_embeddings is None: logger.warning("Embeddings file not found or invalid; semantic search disabled.")
+        if loaded_bm25_index is None: logger.warning("BM25 index file not found or invalid; keyword search disabled.")
         if loaded_embeddings is None and loaded_bm25_index is None:
-             logger.error("Both embeddings and BM25 index are missing. Search impossible.")
+            logger.error("Both embeddings and BM25 index are missing. Search functionality severely limited.")
 
-# (setup_data_and_fetch function remains the same - ensure removed line stays removed)
+# --- Data Fetching Logic ---
 def setup_data_and_fetch(args: argparse.Namespace) -> str:
-    """
-    Handles the 'fetch' command logic, optionally using LLM suggestions.
-    Returns:
-        str: A status message indicating success or failure and key counts.
-    """
-    logger.info("Starting forced data fetch and processing...")
-    status_messages = [] # To collect warnings during the process
+    """Handles the 'fetch' command: gets documents, chunks, embeds, indexes, and saves."""
+    logger.info("Starting data fetch and processing...")
+    status_messages = []
 
-    # --- Determine sources based on args ---
+    # Determine Sources (Default, Custom, LLM Suggestion)
     arxiv_query = ""; target_urls = []; max_results = args.num_arxiv
     try:
         if args.suggest_sources:
             logger.info(f"Attempting LLM source suggestion for topic: '{args.topic}'")
-            if not args.topic:
-                return "Error: Topic (-t) is required when using --suggest-sources." # Return error string
+            if not args.topic: return "Error: Topic (-t) required for --suggest-sources."
 
+            # Simplified prompt for LLM suggestions
+            suggestion_prompt = f"""Suggest search sources for the topic "{args.topic}":
+1. Two arXiv query strings. Prefix *exactly* with "ARXIV_QUERY: ".
+2. Five high-quality, relevant URLs (e.g., conference proceedings, key labs, tech blogs). Prefix *exactly* with "URL: ".
+Provide *only* the queries and URLs in the specified format."""
 
-            # Craft prompt for LLM - **NEEDS CAREFUL TUNING**
-            # Added profile context and refined instructions for formatting
-            suggestion_prompt = f"""You are an expert research assistant helping a machine learning student.
-    Based on the topic "{args.topic}", suggest the following:
-    1.  Two diverse and effective arXiv search query strings suitable for finding key papers. Format each query on a new line prefixed *exactly* with "ARXIV_QUERY: ".
-    2.  Five specific, high-quality, publicly accessible URLs relevant to the topic. Prioritize official conference proceedings (like NeurIPS, ICML, PMLR), key research lab blogs (like OpenAI, Google AI), or highly reputable technical blogs (like distill.pub, lilianweng). Format each URL on a new line prefixed *exactly* with "URL: ".
-
-    Provide *only* the queries and URLs in the specified format, without any introduction, explanation, numbering of sections, or other commentary."""
-
-            logger.info("Sending request to LLM for source suggestions...")
+            logger.info("Requesting source suggestions from LLM...")
             try:
                 suggestion_response = get_llm_response(suggestion_prompt)
                 if suggestion_response:
-                    logger.info("Received suggestions from LLM. Parsing...")
-                    suggested_arxiv_queries = []
-                    suggested_urls = []
-                    for line in suggestion_response.splitlines():
-                        line = line.strip()
-                        if line.startswith("ARXIV_QUERY:"):
-                            query_term = line.replace("ARXIV_QUERY:", "").strip()
-                            if query_term: suggested_arxiv_queries.append(query_term)
-                        elif line.startswith("URL:"):
-                            url_term = line.replace("URL:", "").strip()
-                            if url_term: suggested_urls.append(url_term)
+                    # Parse LLM response
+                    suggested_arxiv_queries = [line.replace("ARXIV_QUERY:", "").strip() for line in suggestion_response.splitlines() if line.strip().startswith("ARXIV_QUERY:")]
+                    suggested_urls = [line.replace("URL:", "").strip() for line in suggestion_response.splitlines() if line.strip().startswith("URL:")]
 
-                    if suggested_arxiv_queries:
-                        arxiv_query = suggested_arxiv_queries[0]
-                        logger.info(f"Using LLM-suggested arXiv query: '{arxiv_query}'")
-                    else:
-                        logger.warning("LLM did not suggest arXiv queries."); arxiv_query = ""; max_results = 0
-                    if suggested_urls:
-                        target_urls = suggested_urls
-                        logger.info(f"Using {len(target_urls)} LLM-suggested URLs.")
-                    else:
-                        logger.warning("LLM did not suggest URLs."); target_urls = []
+                    arxiv_query = suggested_arxiv_queries[0] if suggested_arxiv_queries else ""
+                    target_urls = suggested_urls if suggested_urls else []
+                    if not arxiv_query: logger.warning("LLM did not suggest arXiv queries."); max_results = 0
+                    if not target_urls: logger.warning("LLM did not suggest URLs.")
+                    logger.info(f"Using LLM suggestions: arXiv='{arxiv_query}', URLs={len(target_urls)}")
                 else:
-                     # This part handles LLM call failure or empty response
-                     logger.error("LLM failed to provide source suggestions. Clearing sources.")
+                     logger.error("LLM suggestion failed (empty response). Clearing sources.")
                      arxiv_query = ""; max_results = 0; target_urls = []
-                     status_messages.append("Warning: LLM suggestion failed.") # Add warning
-
-            except Exception as llm_e: # Catch errors during the LLM call itself
+                     status_messages.append("Warning: LLM suggestion failed.")
+            except Exception as llm_e:
                  logger.error(f"Error during LLM suggestion API call: {llm_e}. Clearing sources.", exc_info=True)
                  arxiv_query = ""; max_results = 0; target_urls = []
-                 status_messages.append(f"Warning: LLM suggestion failed ({llm_e}).") # Add warning
+                 status_messages.append(f"Warning: LLM suggestion failed ({llm_e}).")
 
-        elif args.arxiv_query:
+        elif args.arxiv_query: # Custom arXiv query provided
             arxiv_query = args.arxiv_query
-            target_urls = config.TARGET_WEB_URLS
-            logger.info(f"Using user-provided arXiv query: '{arxiv_query}'")
-            logger.info("Using default static target URLs from config.")
-
-        else:
+            target_urls = config.TARGET_WEB_URLS # Use default web URLs
+            logger.info(f"Using custom arXiv query: '{arxiv_query}' and default web URLs.")
+        else: # Use defaults from config
             arxiv_query = config.DEFAULT_ARXIV_QUERY
             target_urls = config.TARGET_WEB_URLS
-            logger.info("Using default arXiv query and static target URLs from config.")
-
+            logger.info("Using default arXiv query and web URLs from config.")
     except Exception as e:
-         logger.error(f"Error during source determination/LLM suggestion: {e}", exc_info=True)
-         return f"Error determining sources: {e}" # Return error string
+         logger.error(f"Error determining sources: {e}", exc_info=True)
+         return f"Error deciding sources: {e}"
 
-     # --- Log final sources ---
-    logger.info(f"Proceeding with arXiv query: '{arxiv_query}' (Max Results: {max_results})")
-    logger.info(f"Proceeding with Target URLs: {target_urls[:3]}..." if len(target_urls) > 3 else target_urls)
+    # Fetching Documents
+    logger.info(f"Fetching: arXiv query='{arxiv_query}' (max={max_results}), URLs={len(target_urls)}")
+    arxiv_metadata_list = fetch_arxiv_papers(arxiv_query, max_results) if (arxiv_query and max_results > 0) else []
+    web_metadata_list = crawl_and_fetch_web_articles(target_urls) if target_urls else []
 
-    # --- Fetching ---
-    arxiv_metadata_list = []; web_metadata_list = []
-    try:
-        if arxiv_query and max_results > 0:
-            arxiv_metadata_list = fetch_arxiv_papers(arxiv_query, max_results)
-        else: logger.info("Skipping arXiv fetch.")
-    except Exception as e: logger.error(f"Failed to fetch arXiv papers: {e}", exc_info=True)
-    try:
-        if target_urls:
-            web_metadata_list = crawl_and_fetch_web_articles(target_urls) # Use the crawler
-        else: logger.info("Skipping web/PDF fetch.")
-    except Exception as e: logger.error(f"Failed to fetch web articles: {e}", exc_info=True)
-
-    original_documents = (arxiv_metadata_list or []) + (web_metadata_list or [])
+    original_documents = arxiv_metadata_list + web_metadata_list
     num_docs_fetched = len(original_documents)
-    if num_docs_fetched == 0:
-        msg = "No data fetched from any source. Aborting processing."
-        logger.error(msg)
-        return f"Error: {msg}" # Return error string
-    logger.info(f"Total original documents fetched: {num_docs_fetched}")
+    if num_docs_fetched == 0: return "Error: No data fetched from any source."
+    logger.info(f"Fetched {num_docs_fetched} total documents.")
 
-    # --- Chunking ---
-    all_chunk_metadata = []
+    # Chunking Documents
     logger.info("Chunking documents...")
-    # ... (Keep your existing chunking loop - uses logger.warning) ...
+    all_chunk_metadata = []
     for doc_index, doc_meta in enumerate(original_documents):
-        original_content = doc_meta.get('content', '') or ''
+        original_content = doc_meta.get('content', '')
         original_url = doc_meta.get('url', f'doc_{doc_index}')
-        if not original_content.strip(): continue
-        # Make sure chunk_text_by_sentences uses the logger defined in this script
-        text_chunks = chunk_text_by_sentences(original_content)
+        if not original_content or not original_content.strip(): continue
+        text_chunks = chunk_text_by_sentences(original_content) # Using default chunk/overlap size
         if not text_chunks: continue
         for chunk_index, chunk_text in enumerate(text_chunks):
-             chunk_id = f"{original_url}_chunk_{chunk_index}"
-             chunk_metadata = {
-                 "chunk_id": chunk_id, "chunk_text": chunk_text, "original_url": original_url,
-                 "original_title": doc_meta.get('title', 'Untitled Document'), "source": doc_meta.get('source', 'unknown'),
-                 "authors": doc_meta.get('authors', []), "published": doc_meta.get('published', None),
-                 "arxiv_entry_id": doc_meta.get('entry_id') if doc_meta.get('source') == 'arxiv' else None
-             }
-             all_chunk_metadata.append(chunk_metadata)
-
+            all_chunk_metadata.append({
+                "chunk_id": f"{original_url}_chunk_{chunk_index}", "chunk_text": chunk_text,
+                "original_url": original_url, "original_title": doc_meta.get('title', 'Untitled'),
+                "source": doc_meta.get('source', 'unknown'), "authors": doc_meta.get('authors', []),
+                "published": doc_meta.get('published', None),
+                "arxiv_entry_id": doc_meta.get('entry_id') if doc_meta.get('source') == 'arxiv' else None
+            })
     num_chunks = len(all_chunk_metadata)
-    if num_chunks == 0:
-        msg = "No chunks were generated from any document. Aborting."
-        logger.error(msg)
-        return f"Error: {msg}" # Return error string
-    logger.info(f"Generated {num_chunks} chunks from {num_docs_fetched} original documents.")
+    if num_chunks == 0: return "Error: No text chunks generated from documents."
+    logger.info(f"Generated {num_chunks} chunks.")
 
-    # --- Processing & Saving ---
+    # Processing & Saving Chunks (Embeddings & BM25)
+    logger.info("Processing chunks (embedding & indexing)...")
     manager = DataManager(config.DATA_DIR, config.METADATA_FILE, config.EMBEDDINGS_FILE, config.BM25_INDEX_FILE)
-    # Ensure EmbeddingModel uses the correct model name from config if needed
     embedder = EmbeddingModel(config.EMBEDDING_MODEL_NAME)
-    all_chunk_texts = [chunk.get('chunk_text', '') for chunk in all_chunk_metadata]
+    all_chunk_texts = [chunk['chunk_text'] for chunk in all_chunk_metadata]
     embeddings = None; bm25_index = None; embed_success = False; bm25_success = False
 
-    # Embedding
-    try:
-        # The line 'if embedder.model is None: embedder.load_model()' was removed previously. Keep it removed.
-        # Default task_type in encode is RETRIEVAL_DOCUMENT, which is correct here.
-        embeddings = embedder.encode(all_chunk_texts)
-        if embeddings is None or not isinstance(embeddings, np.ndarray) or embeddings.shape[0] != num_chunks:
-             logger.error("Embedding generation failed or returned incorrect shape/None.")
-             embeddings = None # Ensure it's None
-             # Optionally raise error if embeddings are critical for fetch to succeed
-             # raise ValueError("Embedding generation failed or returned incorrect shape.")
-        else:
-             logger.info(f"Chunk embeddings generated with shape: {embeddings.shape}")
-             embed_success = True
+    try: # Embedding
+        embeddings = embedder.encode(all_chunk_texts, task_type="RETRIEVAL_DOCUMENT")
+        if embeddings is not None and isinstance(embeddings, np.ndarray) and embeddings.shape[0] == num_chunks:
+            logger.info(f"Embeddings generated (Shape: {embeddings.shape}).")
+            embed_success = True
+        else: logger.error("Embedding generation failed or returned unexpected result.")
     except Exception as e:
-        logger.error(f"Failed to generate chunk embeddings: {e}. Semantic search will be unavailable.", exc_info=True)
-        status_messages.append("Warning: Embedding generation failed.")
-        embeddings = None # Ensure embeddings is None on error
+        logger.error(f"Embedding generation failed: {e}", exc_info=True)
+        status_messages.append("Warning: Embedding failed.")
 
-    # BM25 Indexing
-    try:
-        logger.info("Building BM25 index on chunks...")
-        valid_content = [t for t in all_chunk_texts if isinstance(t, str) and t.strip()]
-        if valid_content:
-            # Ensure tokenize_text uses the logger defined in this script
-            tokenized_corpus = [tokenize_text(t) for t in valid_content]
-            tokenized_corpus = [tok for tok in tokenized_corpus if tok] # Remove empty lists
-            if tokenized_corpus:
-                bm25_index = BM25Okapi(tokenized_corpus)
-                logger.info("BM25 index built on chunks.")
-                bm25_success = True
-            else: logger.warning("Tokenized chunk corpus empty after filtering. BM25 index not built.")
-        else: logger.warning("No valid chunk text content for BM25 index.")
+    try: # BM25 Indexing
+        tokenized_corpus = [tokenize_text(t) for t in all_chunk_texts if isinstance(t, str) and t.strip()]
+        tokenized_corpus = [tok for tok in tokenized_corpus if tok] # Remove empty lists
+        if tokenized_corpus:
+            bm25_index = BM25Okapi(tokenized_corpus)
+            logger.info("BM25 index built.")
+            bm25_success = True
+        else: logger.warning("No valid tokens found for BM25 index after processing chunks.")
     except Exception as e:
-        logger.error(f"Error building BM25 index on chunks: {e}. Keyword search will be unavailable.", exc_info=True)
-        status_messages.append("Warning: BM25 index creation failed.")
+        logger.error(f"BM25 index building failed: {e}", exc_info=True)
+        status_messages.append("Warning: BM25 indexing failed.")
 
-    # --- Saving ---
-    try:
+    try: # Saving Data
         manager.save_all_data(all_chunk_metadata, embeddings, bm25_index)
-        logger.info("New chunked data fetched, processed, and saved successfully.")
-        # Reload components only if save was successful
-        load_components(force_reload=True) # Reload components in global scope
+        logger.info("Processed data saved successfully.")
+        load_components(force_reload=True) # Reload components with new data
 
-        # Construct success message
-        success_msg = f"Success: Fetched {num_docs_fetched} documents, generated {num_chunks} chunks. Saved metadata"
+        success_msg = f"Success: Fetched {num_docs_fetched} docs, generated {num_chunks} chunks. Saved metadata"
         if embed_success: success_msg += ", embeddings"
         if bm25_success: success_msg += ", BM25 index"
         success_msg += "."
-        if status_messages: # Append any warnings
-            success_msg += " " + " ".join(status_messages)
-        return success_msg # Return success string
-
+        if status_messages: success_msg += " " + " ".join(status_messages)
+        return success_msg
     except Exception as e:
-        logger.error(f"Failed to save processed chunked data after fetch: {e}", exc_info=True)
-        # Return error message string
-        return f"Error: Failed to save processed data. Check logs. Details: {e}"
+        logger.error(f"Failed to save processed data: {e}", exc_info=True)
+        return f"Error: Failed to save data. Details: {e}"
 
-# (format_fallback_results function remains the same)
+# --- Fallback Result Formatting ---
 def format_fallback_results(results: List[Tuple[Dict[str, Any], float]], num_to_show: int) -> str:
-    """Helper to format fallback retrieval results into a string."""
-    if not results:
-        return "LLM response failed and no relevant document chunks were found matching the query."
-
+    """Formats retrieval results into a string if the LLM fails."""
+    if not results: return "LLM response failed; no relevant document chunks found."
     actual_num_to_show = min(num_to_show, len(results))
-    lines = [f"LLM response failed. Showing top {actual_num_to_show} retrieved document chunks (fallback):"]
-    displayed_count = 0
-    for rank, (chunk_metadata, fused_score) in enumerate(results):
-        if displayed_count >= actual_num_to_show: break
+    lines = [f"LLM response failed. Top {actual_num_to_show} retrieved document chunks (fallback):"]
+    for rank, (chunk_meta, score) in enumerate(results[:actual_num_to_show]):
         lines.append("-" * 20)
-        lines.append(f"{rank + 1}. [Score: {fused_score:.4f}] [Source: {chunk_metadata.get('source', 'N/A')}]")
-        lines.append(f"   Title: {chunk_metadata.get('original_title', 'N/A')}")
-        lines.append(f"   URL: {chunk_metadata.get('original_url', '#')}")
-        lines.append(f"   Snippet: {(chunk_metadata.get('chunk_text', '') or '')[:200]}...")
-        displayed_count += 1
+        lines.append(f"{rank + 1}. [Score: {score:.4f}] [Src: {chunk_meta.get('source', '?')}]")
+        lines.append(f"   Title: {chunk_meta.get('original_title', 'N/A')}")
+        lines.append(f"   URL: {chunk_meta.get('original_url', '#')}")
+        lines.append(f"   Snippet: {(chunk_meta.get('chunk_text', '') or '')[:200]}...")
     return "\n".join(lines)
 
-# (run_recommendation function remains the same)
+# --- Recommendation Logic ---
 def run_recommendation(query: str, num_final_results: int, general_mode: bool, concise_mode: bool) -> Tuple[Optional[str], List[str]]:
-    """
-    Handles recommendation logic. Returns response string and context source strings.
-    """
-    mode_name = "Hybrid-Knowledge RAG (Local Docs + General)" if general_mode else "Strict RAG (Local Docs Only)"
-    style_name = "Concise/Structured" if concise_mode else "Default/Detailed" # Log the style
-    logger.info(f"Running recommendation in {mode_name} Mode ({style_name} Prompt) for query: '{query}'")
+    """Handles recommendation: retrieves chunks, prepares context, calls LLM."""
+    mode_name = "Hybrid" if general_mode else "Strict"
+    style_name = "Concise" if concise_mode else "Detailed"
+    logger.info(f"Running recommendation ({mode_name} RAG, {style_name} Prompt) for query: '{query[:100]}...'")
 
     llm_answer_final: Optional[str] = None
     source_info_list: List[str] = []
     hybrid_results: List[Tuple[Dict[str, Any], float]] = []
 
     try:
-        # --- Ensure Components Loaded ---
+        # Ensure components are loaded
         if loaded_recommender is None or loaded_metadata is None:
-            logger.info("Components not loaded, calling load_components().")
+            logger.info("Components not loaded, attempting load...")
             load_components()
         if loaded_recommender is None or loaded_metadata is None:
-             raise RuntimeError("Core components (Recommender/Metadata) could not be loaded. Ensure data exists.")
+             raise RuntimeError("Core components failed to load. Run 'fetch' command.")
 
-        # --- Retrieval Step ---
-        logger.info("Retrieving top documents from local data for context...")
+        # Retrieval Step
+        logger.info("Retrieving relevant document chunks...")
+        # Request slightly more candidates than needed for context/fallback
         num_candidates = max(config.RAG_NUM_DOCS + 5, num_final_results + 5)
+        num_candidates = min(num_candidates, len(loaded_metadata))
 
-        if loaded_metadata:
-            num_candidates = min(num_candidates, len(loaded_metadata))
-        else:
-            num_candidates = 0
-
-        if num_candidates > 0 and loaded_metadata:
-             # Ensure recommender uses the logger defined in this script if needed internally
+        if num_candidates > 0:
              hybrid_results = loaded_recommender.recommend(
-                 query=query,
-                 resource_metadata=loaded_metadata,
-                 resource_embeddings=loaded_embeddings,
-                 bm25_index=loaded_bm25_index,
-                 semantic_candidates=config.SEMANTIC_CANDIDATES,
-                 keyword_candidates=config.KEYWORD_CANDIDATES,
-                 fusion_k=config.RANK_FUSION_K,
+                 query=query, resource_metadata=loaded_metadata, resource_embeddings=loaded_embeddings,
+                 bm25_index=loaded_bm25_index, semantic_candidates=config.SEMANTIC_CANDIDATES,
+                 keyword_candidates=config.KEYWORD_CANDIDATES, fusion_k=config.RANK_FUSION_K,
                  top_n_final=num_candidates
              )
-        else:
-            logger.warning("Skipping recommendation step due to missing metadata or zero candidates.")
-            hybrid_results = []
+             logger.info(f"Retrieved {len(hybrid_results)} candidate chunks.")
+        else: logger.warning("Skipping retrieval (no metadata or zero candidates needed).")
 
-        # --- Prepare Context & Sources ---
+        # Prepare Context & Sources for LLM and display
         context_string = "No relevant document chunks were found in the local data."
         if hybrid_results:
             top_chunks_for_rag = hybrid_results[:config.RAG_NUM_DOCS]
             context_texts = []
             reference_map = {}
-            for i, (chunk_meta, score) in enumerate(top_chunks_for_rag):
+            for i, (chunk_meta, _) in enumerate(top_chunks_for_rag):
                 chunk_num = i + 1
                 title = chunk_meta.get('original_title', 'N/A')
                 url = chunk_meta.get('original_url', '#')
                 snippet = (chunk_meta.get('chunk_text', '') or '')[:config.MAX_CONTEXT_LENGTH_PER_DOC]
+                # Format context for LLM prompt
                 context_texts.append(f"[{chunk_num}] Title: {title}\nURL: {url}\nSnippet: {snippet}")
+                # Format source for display list (no leading spaces needed here)
                 reference_map[chunk_num] = f"{title} (URL: {url})"
 
             context_string = "\n\n---\n\n".join(context_texts)
-            source_info_list = [f"  [{num}] {details}" for num, details in reference_map.items()]
-            logger.info(f"Prepared context from {len(top_chunks_for_rag)} retrieved document chunks.")
-        else:
-            logger.info("No relevant document chunks found for context.")
+            # Format for the list to be returned for display (e.g., in Streamlit)
+            source_info_list = [f"[{num}] {details}" for num, details in reference_map.items()]
+            logger.info(f"Prepared context from {len(top_chunks_for_rag)} chunks.")
+        else: logger.info("No relevant document chunks found to provide as context.")
 
-        # --- Prompt Selection and LLM Call ---
+        # Prompt Selection and LLM Call
         final_prompt: str = ""
         prompt_template_base = """[INST] {system_message}
 
@@ -474,231 +354,192 @@ Provided Document Chunks:
 User Question: {query} [/INST]
 Answer:"""
 
-        # --- Conditional Logic for Prompts ---
-        # (This whole section remains the same)
+        # Decide which system message to use based on modes
+        # (Using the previously corrected prompts with simplified citation instruction)
         if general_mode:
             if concise_mode:
-                logging.info("Using Hybrid-Knowledge RAG prompt (Concise/Structured)")
-                system_message = (
+                system_message = ( # Hybrid + Concise
                     "You are a helpful AI assistant.\n"
-                    "Provide a structured summary answering the user's question.\n"
-                    "Use the provided document chunk excerpts for context and specific details where relevant, but also use your general knowledge for comprehensiveness.\n"
-                    "Format your response exactly as follows, using Markdown headers and ensuring line breaks between sections:\n\n"
-                    "## What is it about:\n"
-                    "[Your 2-7 sentence introduction here]\n\n"
-                    "## Key Findings:\n"
-                    "[Your 4-10 bullet points summarizing findings here, like:\n* Point 1 [cite]\n* Point 2 [cite]]\n\n"
-                    "## Conclusion:\n"
-                    "[Your 2-5 sentence conclusion here, mentioning limitations if needed]\n\n"
-                    "Cite relevant chunk numbers using bracketed numerals like [1], [2] when using information primarily from the chunks.\n"
-                    "At the very end, provide a numbered reference list mapping citations [N] to the source title and URL.\n"
-                    "Finally, after the reference list, add a section titled '## Further Reading Suggestions:' and suggest 1-4 specific resources."
+                    "Give a structured summary answering the user's question.\n"
+                    "Use the document chunks I provide for details when needed, but also use your general knowledge.\n"
+                    "Format your response *exactly* like this, using Markdown headers:\n\n"
+                    "## What is it about:\n[...]\n\n"
+                    "## Key Findings:\n[...]\n\n"
+                    "## Conclusion:\n[...]\n\n"
+                    "Cite relevant chunk numbers like [1], [2].\n"
+                    "At the very end, create a section `## Citations:`.\n"
+                    "Under that heading, provide a numbered list mapping citations [N] used to the source document.\n"
+                    "Format each item by copying the Title and URL associated with that number from the 'Provided Document Chunks' section above (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
+                    "After Citations, add `## Further Reading Suggestions:`.\n"
+                    "Suggest 1-4 relevant resources as a numbered list: `1. Resource Title: <URL or Description>`"
                 )
             else:
-                logging.info("Using Hybrid-Knowledge RAG prompt (Default/Detailed)")
-                system_message = (
-                     "You are an AI assistant specialized in analyzing technical documents.\n"
-                     "Provide a **thorough, detailed, and comprehensive** answer to the user's question based **only** on the provided document chunk excerpts below.\n"
-                     "The goal is a well-explained, **multi-paragraph response**. Format your response clearly using the following structure:\n\n"
-                     "1.  **Overview Paragraph:** Start with a paragraph providing a general introduction to the main concepts based on the context.\n"
-                     "2.  **Detailed Sections:** For each major aspect or topic relevant to the question found in the text:\n"
-                     "    * Use Markdown headings (`## Heading Name`) to create distinct sections for each topic.\n"
-                     "    * Provide **in-depth explanations** under each heading. **Synthesize information *across multiple relevant document chunks*** where applicable.\n"
-                     "    * Aim to develop each key point with approximately **3-5 sentences** of detailed explanation, drawing directly from the provided text.\n"
-                     "    * Where possible, **explain the relationships or connections** between different concepts mentioned.\n"
-                     "    * Include specific examples or details mentioned in the text.\n"
-                     "    * If the text presents different perspectives or nuances, try to **reflect those accurately**.\n"
-                     "3.  **Conclusion Paragraph:** End with a paragraph summarizing the main points discussed and clearly stating any limitations based *only* on the provided text excerpts (e.g., if the answer is incomplete due to limited context).\n\n"
-                     "**Crucially, base your entire answer ONLY on the provided document chunks.** Do not use any prior knowledge.\n"
-                     "When referencing information from a specific chunk, cite its corresponding number using bracketed numerals like `[1]`, `[2]`, etc.\n"
-                     "At the very end of your response, provide a numbered reference list mapping each citation number `[N]` to the corresponding source document's original title and URL."
+                system_message = ( # Hybrid + Detailed
+                     "You are an AI assistant expert at analyzing technical documents.\n"
+                     "Give a **very detailed and complete** answer to the user's question.\n"
+                     "Base your answer mainly on the 'Provided Document Chunks', but add relevant general knowledge for clarity.\n"
+                     "Structure your answer clearly:\n1. Overview paragraph.\n2. Detailed Sections (use `## Heading` for topics, explain in detail using 3-5 sentences per point, combine info across chunks).\n3. Conclusion paragraph (summarize, mention limits).\n\n"
+                     "Cite chunk numbers like [1], [2].\n"
+                     "At the end, create `## Citations:`.\n"
+                     "Under it, list citations [N] by copying Title/URL from context (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
+                     "After Citations, add `## Further Reading Suggestions:`.\n"
+                     "Suggest 1-4 resources as a numbered list: `1. Resource Title: <URL or Description>`"
                 )
-        else: # Strict RAG Mode
+        else: # Strict Mode
             if concise_mode:
-                logging.info("Using Strict RAG prompt (Concise/Structured)")
-                system_message = (
-                     "You are an AI assistant specialized in analyzing technical documents.\n"
-                     "Provide a concise summary answering the user's question based only on the provided document chunk excerpts below.\n"
-                     "Format your response exactly as follows, using Markdown headers and ensuring line breaks between sections:\n\n"
-                     "## What is it about:\n"
-                     "[Your 2-3 sentence introduction here]\n\n"
-                     "## Key Findings:\n"
-                     "[Your 4-8 bullet points summarizing findings here, like:\n* Point 1 [cite]\n* Point 2 [cite]]\n\n"
-                     "## Conclusion:\n"
-                     "[Your 3-4 sentence conclusion here, mentioning limitations if needed]\n\n"
-                     "Cite relevant chunk numbers using bracketed numerals like [1], [2].\n"
-                     "At the very end, provide a numbered reference list mapping citations [N] to the source title and URL.\n"
-                     "Do not use any prior knowledge."
+                system_message = ( # Strict + Concise
+                     "You are an AI assistant expert at analyzing technical documents.\n"
+                     "Give a short summary answering the user's question using *only* the 'Provided Document Chunks'.\n"
+                     "Format *exactly* like this:\n\n"
+                     "## What is it about:\n[...]\n\n"
+                     "## Key Findings:\n[...]\n\n"
+                     "## Conclusion:\n[...]\n\n"
+                     "Cite chunk numbers like [1], [2].\n"
+                     "At the end, create `## Citations:`.\n"
+                     "Under it, list citations [N] by copying Title/URL from context (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
+                     "If chunks are insufficient, state limitations. Do not use prior knowledge."
                 )
             else:
-                logging.info("Using Strict RAG prompt (Default/Detailed)")
-                system_message = (
-                     "You are an AI assistant specialized in analyzing technical documents.\n"
-                     "Provide a detailed and comprehensive answer to the user's question based *only* on the provided document chunk excerpts below.\n"
-                     "Format your response in a clear structure with these elements:\n\n"
-                     "1. Start with a brief overview paragraph introducing the main concepts.\n"
-                     "2. For each major aspect of the answer:\n"
-                     "   - Use headings (## Heading) to separate distinct topics\n"
-                     "   - Include detailed explanations with examples where available\n"
-                     "   - Develop each key point with 3-5 sentences of explanation\n"
-                     "3. End with a conclusion summarizing the key findings\n\n"
-                     "Synthesize information across chunks when relevant. When referencing information from a specific chunk, cite its corresponding number using bracketed numerals like [1], [2], etc.\n"
-                     "At the very end of your response, provide a numbered reference list mapping each citation number [N] to the corresponding source document's original title and URL (e.g., '[1] Title One - http://example.com/one').\n"
-                     "If the chunks do not contain enough information to answer the question completely and accurately, clearly state the limitations based on the provided text. Do not use any prior knowledge."
+                system_message = ( # Strict + Detailed
+                     "You are an AI assistant expert at analyzing technical documents.\n"
+                     "Give a detailed answer using *only* the 'Provided Document Chunks'.\n"
+                     "Structure:\n1. Overview.\n2. Detailed Sections (`## Heading`, 3-5 sentences/point, combine chunks).\n3. Conclusion.\n\n"
+                     "Cite chunk numbers like [1], [2].\n"
+                     "At the end, create `## Citations:`.\n"
+                     "Under it, list citations [N] by copying Title/URL from context (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
+                     "If chunks are insufficient, state limitations. **Do not use any outside knowledge.**"
                 )
 
-        # --- Format Final Prompt ---
         final_prompt = prompt_template_base.format(system_message=system_message, context=context_string, query=query)
 
-        logger.info(f"Generating response using {config.LLM_PROVIDER} API ({config.LLM_MODEL_ID})...")
-        llm_answer_raw = get_llm_response(final_prompt) # Call LLM
+        logger.info(f"Sending request to LLM ({config.LLM_PROVIDER}, {config.LLM_MODEL_ID})...")
+        llm_answer_raw = get_llm_response(final_prompt)
 
         if llm_answer_raw:
-            llm_answer_final = llm_answer_raw.strip() # Assign the successful response
-            logger.info("LLM response generated successfully.")
+            llm_answer_final = llm_answer_raw.strip()
+            logger.info("LLM response received.")
         else:
-            logger.warning("LLM generation failed or returned no answer.")
+            logger.warning("LLM generation failed or returned empty response.")
             llm_answer_final = format_fallback_results(hybrid_results, num_final_results)
 
-    except RuntimeError as e: # Catch specific error from load_components
-        logger.error(f"Initialization Error during recommendation: {e}", exc_info=True)
+    except RuntimeError as e:
+        logger.error(f"Recommendation failed due to component loading error: {e}", exc_info=False) # No need for full traceback here
         llm_answer_final = f"Error: {e}. Cannot run recommendation."
     except Exception as e:
-        logger.error(f"An unexpected error occurred during recommendation execution: {e}", exc_info=True)
-        llm_answer_final = f"An error occurred during recommendation: {e}"
+        logger.error(f"Unexpected error during recommendation: {e}", exc_info=True)
+        llm_answer_final = f"An error occurred: {e}"
 
     return llm_answer_final, source_info_list
 
-# (run_arxiv_search function remains the same)
+# --- arXiv Search Logic ---
 def run_arxiv_search(query: str, num_results: int) -> List[Dict[str, Any]]:
-    """
-    Performs a direct arXiv search. Returns list of result dicts or empty list on error.
-    """
-    logger.info(f"Searching arXiv for: '{query}' (Top {num_results} results)")
+    """Performs a direct arXiv search."""
+    logger.info(f"Searching arXiv directly for: '{query}' (Top {num_results})")
     results_list: List[Dict[str, Any]] = []
     try:
         client = arxiv.Client(page_size=min(num_results, 100), delay_seconds=1.0, num_retries=3)
         search = arxiv.Search(query=query, max_results=num_results, sort_by=arxiv.SortCriterion.Relevance)
         for result in client.results(search):
             results_list.append({
-                "title": result.title,
+                "title": result.title or "N/A",
                 "authors": [str(a) for a in result.authors],
                 "published": result.published.strftime('%Y-%m-%d') if result.published else "N/A",
                 "pdf_url": result.pdf_url or 'N/A',
-                "summary": (result.summary or '').replace('  ', ' ').strip()
+                "summary": (result.summary or '').replace('\n', ' ').strip() # Clean summary
             })
-        if not results_list: logger.info("No results found on arXiv for this query.")
-        else: logger.info(f"Found {len(results_list)} results on arXiv.")
+        logger.info(f"arXiv search found {len(results_list)} results.")
     except Exception as e:
-        logger.error(f"An error occurred during arXiv search: {e}", exc_info=True)
-        results_list = []
+        logger.error(f"arXiv search failed: {e}", exc_info=True)
     return results_list
 
 
-# --- Main Execution Guard ---
+# --- Main CLI Execution ---
 def main():
-    """Parses arguments, configures logging, and runs the appropriate action."""
+    """Parses arguments and runs the chosen command."""
 
-    # --- Argument Parsing ---
-    # (Argument parsing remains the same)
     parser = argparse.ArgumentParser(
-        description="Hybrid Study Resource Recommender CLI with RAG",
+        description="Hybrid Search RAG CLI Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('-v', '--verbose', action='store_true',
-                        help="Enable INFO level logging for detailed output.")
-    # ... (rest of parser setup) ...
-    subparsers = parser.add_subparsers(dest='command', help='Available commands (recommend, fetch, find_arxiv)', required=True)
-    # Recommend Command
-    parser_recommend = subparsers.add_parser('recommend', help='Get recommendations or answer questions using RAG modes.')
-    parser_recommend.add_argument('--concise', action='store_true', help='Generate a concise, structured summary instead of a detailed answer.')
-    parser_recommend.add_argument('-q', '--query', type=str, default=config.DEFAULT_QUERY, help=f"Query string for recommendation (default: '{config.DEFAULT_QUERY}')")
-    parser_recommend.add_argument('-n', '--num_results', type=int, default=config.TOP_N_RESULTS, help=f'Number of fallback results to display (default: {config.TOP_N_RESULTS})')
-    parser_recommend.add_argument('--general', action='store_true', help='Use Hybrid-Knowledge RAG mode (allows LLM general knowledge).')
-    # Fetch Command
-    parser_fetch = subparsers.add_parser('fetch', help='Force fetch/process fresh data from sources (optionally using LLM suggestions).')
-    parser_fetch.add_argument('--suggest-sources', action='store_true',
-                              help="Use LLM to suggest arXiv queries and URLs based on the topic provided via -t/--topic.")
-    parser_fetch.add_argument('-t', '--topic', type=str, default=None,
-                              help="Topic for LLM source suggestion (required if --suggest-sources is used).")
-    parser_fetch.add_argument('-aq', '--arxiv_query', type=str, default=None,
-                              help="Specify a custom arXiv query string directly (overrides config default, ignored if --suggest-sources is used).")
-    parser_fetch.add_argument('-na', '--num_arxiv', type=int, default=config.MAX_ARXIV_RESULTS,
-                              help=f"Max arXiv results override (applies to default, custom, or suggested query) (default: {config.MAX_ARXIV_RESULTS})")
-    # Find Arxiv Command
-    parser_find = subparsers.add_parser('find_arxiv', help='Search arXiv directly for relevant papers based on a query.')
-    parser_find.add_argument('-q', '--query', type=str, required=True, help="Query string for arXiv search.")
-    parser_find.add_argument('-n', '--num_results', type=int, default=10, help='Max number of arXiv results to display (default: 10)')
+    parser.add_argument('-v', '--verbose', action='store_true', help="Enable detailed INFO logging.")
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands', required=True)
+
+    # Recommend Command Parser
+    parser_recommend = subparsers.add_parser('recommend', help='Get recommendations or answers using RAG.')
+    parser_recommend.add_argument('-q', '--query', type=str, default=config.DEFAULT_QUERY, help=f"Query string (default: '{config.DEFAULT_QUERY}')")
+    parser_recommend.add_argument('-n', '--num_results', type=int, default=config.TOP_N_RESULTS, help=f'Number of fallback results (default: {config.TOP_N_RESULTS})')
+    parser_recommend.add_argument('--general', action='store_true', help='Use Hybrid RAG mode (LLM general knowledge allowed).')
+    parser_recommend.add_argument('--concise', action='store_true', help='Use concise/structured prompt template.')
+
+    # Fetch Command Parser
+    parser_fetch = subparsers.add_parser('fetch', help='Fetch/process fresh data.')
+    parser_fetch.add_argument('--suggest-sources', action='store_true', help="Use LLM to suggest sources based on topic.")
+    parser_fetch.add_argument('-t', '--topic', type=str, help="Topic for LLM source suggestion.")
+    parser_fetch.add_argument('-aq', '--arxiv_query', type=str, help="Specify custom arXiv query (overrides default).")
+    parser_fetch.add_argument('-na', '--num_arxiv', type=int, default=config.MAX_ARXIV_RESULTS, help=f"Max arXiv results (default: {config.MAX_ARXIV_RESULTS})")
+
+    # Find Arxiv Command Parser
+    parser_find = subparsers.add_parser('find_arxiv', help='Search arXiv directly.')
+    parser_find.add_argument('-q', '--query', type=str, required=True, help="Query string for arXiv.")
+    parser_find.add_argument('-n', '--num_results', type=int, default=10, help='Max arXiv results (default: 10)')
 
     args = parser.parse_args()
 
-    # --- Configure Logging ---
+    # Configure Logging Level
     log_level = logging.INFO if args.verbose else logging.WARNING
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(levelname)-7s - %(name)-15s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)-7s - %(name)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', force=True)
 
-    # --- Run Pre-checks AFTER Logging is Configured ---
-    # Ensure this check runs for CLI execution
+    # Run NLTK Check (Important for tokenization)
     check_nltk_data()
 
-    # --- Argument Validation ---
+    # Input Validation for Fetch Command
     if args.command == 'fetch' and args.suggest_sources and not args.topic:
-        parser.error("--suggest-sources requires -t/--topic to be specified.")
+        parser.error("--suggest-sources requires -t/--topic.")
 
-     # --- Execute Command ---
-    # (Command execution logic remains the same)
+     # Execute Selected Command
     try:
         if args.command == 'recommend':
             answer, sources = run_recommendation(args.query, args.num_results, args.general, args.concise)
-            # Print CLI Output
-            mode_name = "Hybrid-Knowledge RAG (Local Docs + General)" if args.general else "Strict RAG (Local Docs Only)"
-            print(f"\n--- Running in {mode_name} Mode ---")
-            print(f"--- Query: '{args.query}' ---")
+            # Format and print CLI output
+            mode_name = "Hybrid" if args.general else "Strict"
+            print(f"\n--- Running in {mode_name} RAG Mode ---")
+            print(f"Query: '{args.query}'")
             print("\n--- Assistant Response ---")
             if answer:
-                try:
-                    terminal_width = os.get_terminal_size().columns
-                except OSError:
-                    terminal_width = 80
+                try: terminal_width = os.get_terminal_size().columns
+                except OSError: terminal_width = 80
                 print(textwrap.fill(answer, width=terminal_width, initial_indent="  ", subsequent_indent="  "))
-            else:
-                print("  No response or fallback generated.")
-            print("\n--- Local Document Chunks Provided as Context ---")
-            print("\n".join(sources) if sources else "  No context provided to LLM.")
-            print("-" * 30)
+            else: print("  No response generated.")
+            print("\n--- Context Sources Provided to LLM ---")
+            print("\n".join(sources) if sources else "  None")
+            print("-" * 40)
 
         elif args.command == 'fetch':
             status_message = setup_data_and_fetch(args)
-            # Print CLI Output
-            print(f"\n--- Fetch Status ---")
-            print(f"  {status_message}")
-            print("-" * 30)
+            print(f"\n--- Fetch Status ---\n  {status_message}\n" + "-" * 40)
 
         elif args.command == 'find_arxiv':
             results = run_arxiv_search(args.query, args.num_results)
-            # Print CLI Output
-            print(f"\n--- Searching arXiv for: '{args.query}' (Top {args.num_results}) ---")
-            if not results:
-                print("  No results found.")
+            print(f"\n--- arXiv Search Results for: '{args.query}' (Top {args.num_results}) ---")
+            if not results: print("  No results found.")
             else:
                 for i, paper in enumerate(results):
                     print(f"\n{i + 1}. Title: {paper.get('title', 'N/A')}")
-                    print(f"   Authors: {', '.join(paper.get('authors', []))}")
+                    print(f"   Authors: {', '.join(paper.get('authors', []) or ['N/A'])}")
                     print(f"   Published: {paper.get('published', 'N/A')}")
-                    print(f"   PDF Link: {paper.get('pdf_url', '#')}")
+                    print(f"   Link: {paper.get('pdf_url', '#')}")
                     summary = paper.get('summary', 'N/A')
-                    print(f"   Summary: {summary[:500]}{'...' if len(summary) > 500 else ''}")
+                    print(f"   Summary: {summary[:400]}{'...' if len(summary) > 400 else ''}")
                     print("-" * 20)
-            print("-" * 30)
+            print("-" * 40)
 
     except Exception as e:
-         logger.critical(f"An error occurred during command execution: {e}", exc_info=True)
+         logger.critical(f"CLI command execution failed: {e}", exc_info=True)
+         # Optionally print a simpler error to the user
+         print(f"\nERROR: An unexpected error occurred: {e}", file=sys.stderr)
          sys.exit(1)
 
+# Script entry point guard
 if __name__ == "__main__":
     main()

@@ -1,211 +1,182 @@
 # hybrid_search_rag/retrieval/recommender.py
-"""Handles hybrid recommendation logic using semantic search and BM25."""
+"""Handles hybrid recommendation using semantic search (embeddings) and keyword search (BM25),
+fusing the results using Reciprocal Rank Fusion (RRF)."""
 
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from rank_bm25 import BM25Okapi
+from sklearn.metrics.pairwise import cosine_similarity # For semantic search
+from rank_bm25 import BM25Okapi # For keyword search
 from typing import List, Dict, Any, Tuple, Optional
 import logging
-import nltk
+import nltk # For tokenization and stopwords
 from nltk.corpus import stopwords
-import string
-import importlib.resources # For checking NLTK data
+import string # For punctuation removal
 
-# Import EmbeddingModel relative to the package structure
-# --- Ensure this points to the correct embedding model implementation ---
-from .embedding_model_gemini import EmbeddingModel
-# ---
+# Import the configured EmbeddingModel implementation
+from .embedding_model_gemini import EmbeddingModel # Assumes Gemini is the configured model
 
 logger = logging.getLogger(__name__)
 
-# --- NLTK Data Handling ---
-# (NLTK code remains unchanged - assuming it's correct)
-NLTK_STOPWORDS = None
-NLTK_DATA_AVAILABLE = {'punkt': False, 'stopwords': False}
+# --- NLTK Data Setup ---
+# Check for required NLTK data ('punkt', 'stopwords') and attempt download if missing.
+NLTK_STOPWORDS: Optional[set] = None
+NLTK_DATA_AVAILABLE: Dict[str, bool] = {'punkt': False, 'stopwords': False}
 
 def _check_and_load_nltk_data():
-    """Checks required NLTK data and attempts download if missing."""
-    global NLTK_STOPWORDS # Allow modification of global variable
-
+    """Checks and potentially downloads NLTK data required for tokenization."""
+    global NLTK_STOPWORDS
     data_to_check = {'punkt': 'tokenizers/punkt', 'stopwords': 'corpora/stopwords'}
     needs_download = []
 
+    # logger.info("Checking NLTK data availability...") # Can be verbose
     for name, path in data_to_check.items():
         try:
             nltk.data.find(path)
             NLTK_DATA_AVAILABLE[name] = True
-            logger.debug(f"NLTK data '{name}' found.")
         except LookupError:
             NLTK_DATA_AVAILABLE[name] = False
             needs_download.append(name)
-            logger.warning(f"NLTK data '{name}' not found.")
+            logger.warning(f"NLTK data '{name}' not found. Attempting download.")
 
     if needs_download:
-        logger.info(f"Attempting to download missing NLTK data: {', '.join(needs_download)}...")
+        logger.info(f"Downloading missing NLTK data: {', '.join(needs_download)}...")
         try:
             for name in needs_download:
                 if nltk.download(name, quiet=True):
                     logger.info(f"Successfully downloaded NLTK data '{name}'.")
                     NLTK_DATA_AVAILABLE[name] = True
                 else:
-                    logger.error(f"Failed to download NLTK data '{name}'.")
+                    logger.error(f"NLTK download command failed for '{name}'.")
         except Exception as e:
-            logger.error(f"An error occurred during NLTK download: {e}")
+            logger.error(f"NLTK download failed: {e}")
 
-    # Load stopwords
+    # Load stopwords if available
     if NLTK_DATA_AVAILABLE['stopwords']:
         try:
             NLTK_STOPWORDS = set(stopwords.words('english'))
-            logger.info("NLTK stopwords loaded.")
+            logger.info(f"Loaded {len(NLTK_STOPWORDS)} NLTK English stopwords.")
         except Exception as e:
-             logger.error(f"Failed to load NLTK stopwords even after potential download: {e}")
-             NLTK_STOPWORDS = set() # Fallback
+             logger.error(f"Failed to load NLTK stopwords: {e}")
+             NLTK_STOPWORDS = set() # Fallback to empty set
     else:
-        NLTK_STOPWORDS = set() # Fallback if download failed
+        logger.warning("NLTK stopwords data unavailable. Using empty stopword list.")
+        NLTK_STOPWORDS = set()
 
-# --- Tokenizer for BM25 ---
-# (tokenize_text function remains unchanged - assuming it's correct)
+# Run check/load when the module is imported
+_check_and_load_nltk_data()
+# --- End NLTK Data Setup ---
+
+# --- BM25 Tokenizer ---
 def tokenize_text(text: str) -> List[str]:
-    """Basic tokenizer: lowercases, removes punctuation, removes stopwords."""
-    if not isinstance(text, str): return []
+    """Basic tokenization for BM25: lowercases, removes punctuation & stopwords."""
+    if not isinstance(text, str):
+        logger.warning("Attempted to tokenize non-string input.")
+        return []
     try:
         if not NLTK_DATA_AVAILABLE['punkt']:
-             logger.error("Cannot tokenize: NLTK 'punkt' data is unavailable.")
-             return [] # Cannot proceed without tokenizer data
+             logger.error("NLTK 'punkt' data unavailable! Cannot tokenize for keyword search.")
+             return []
         text = text.lower()
+        # Remove punctuation using translation table
         text = text.translate(str.maketrans('', '', string.punctuation))
         tokens = nltk.word_tokenize(text)
-        # Use the loaded stopwords set (might be empty if download failed)
         current_stopwords = NLTK_STOPWORDS if NLTK_STOPWORDS is not None else set()
+        # Return non-stopwords with length > 1
         return [word for word in tokens if word not in current_stopwords and len(word) > 1]
     except Exception as e:
-        logger.error(f"Error during tokenization of text snippet starting with '{text[:50]}...': {e}", exc_info=True)
+        logger.error(f"Tokenization failed for text snippet: '{text[:50]}...': {e}", exc_info=True)
         return []
 
-
 class Recommender:
-    """Calculates hybrid similarity using embeddings and BM25, then fuses ranks."""
+    """Orchestrates hybrid search using embeddings and BM25, fused with RRF."""
 
     def __init__(self, embed_model: EmbeddingModel):
-        """
-        Initializes the Recommender.
-        Relies on the provided EmbeddingModel instance being configured correctly.
-        """
+        """Initializes with a pre-configured EmbeddingModel instance."""
         self.embed_model = embed_model
-        # --- MODIFICATION START ---
-        # Removed the check: if self.embed_model.model is None:
-        # The new embedding_model_gemini handles its configuration internally
-        # during its own __init__. If it fails there, it should raise an error.
-        logger.info("Recommender initialized with EmbeddingModel.")
-        # --- MODIFICATION END ---
+        logger.info(f"Recommender initialized with embedding model: {type(embed_model).__name__}")
 
     def _semantic_search(self, query_embedding: Optional[np.ndarray], resource_embeddings: Optional[np.ndarray], top_n: int) -> List[Tuple[int, float]]:
-        """Performs semantic search and returns (index, score) tuples."""
-        # (This method remains unchanged)
-        if resource_embeddings is None or query_embedding is None or resource_embeddings.size == 0:
-            logger.debug("Skipping semantic search due to missing embeddings.")
+        """Performs semantic search using cosine similarity."""
+        if resource_embeddings is None or query_embedding is None or query_embedding.size == 0 or resource_embeddings.size == 0:
+            # logger.debug("Skipping semantic search due to missing or empty embeddings.") # Debug level
             return []
         try:
-            # Ensure query_embedding is 2D for cosine_similarity
-            if query_embedding.ndim == 1:
-                 query_embedding_2d = query_embedding.reshape(1, -1)
-            elif query_embedding.ndim == 2 and query_embedding.shape[0] == 1:
-                 query_embedding_2d = query_embedding
-            else:
-                 logger.error(f"Unexpected query embedding shape: {query_embedding.shape}")
+            # Ensure query embedding is 2D (1, embedding_dim)
+            query_embedding_2d = query_embedding.reshape(1, -1) if query_embedding.ndim == 1 else query_embedding
+            if query_embedding_2d.ndim != 2 or query_embedding_2d.shape[0] != 1:
+                 logger.error(f"Invalid query embedding shape: {query_embedding.shape}. Aborting semantic search.")
+                 return []
+            if resource_embeddings.ndim != 2 or resource_embeddings.shape[1] != query_embedding_2d.shape[1]:
+                 logger.error(f"Embeddings shape mismatch: Resource={resource_embeddings.shape}, Query={query_embedding_2d.shape}. Aborting.")
                  return []
 
+            # Calculate cosine similarity
             similarities = cosine_similarity(query_embedding_2d, resource_embeddings)[0]
+
+            # Find top N indices efficiently using argpartition
             num_results = min(top_n, len(similarities))
             if num_results <= 0: return []
+            # Get indices of top N elements (unsorted among themselves)
+            top_indices_unsorted = np.argpartition(similarities, -num_results)[-num_results:]
+            # Sort only the top N indices by score (descending)
+            top_indices_sorted = top_indices_unsorted[np.argsort(similarities[top_indices_unsorted])[::-1]]
 
-            # Get indices of top N scores
-            # Using partition is slightly more efficient than full sort for finding top N
-            # Ensure we handle cases where num_results is larger than available similarities
-            actual_top_n = min(num_results, len(similarities))
-            if actual_top_n > 0:
-                 top_indices = np.argpartition(similarities, -actual_top_n)[-actual_top_n:]
-                 # Sort only the top N indices by score
-                 top_indices = top_indices[np.argsort(similarities[top_indices])[::-1]]
-            else:
-                 top_indices = np.array([], dtype=int)
-
-
-            # Create results list (index, score)
-            # Added a small threshold to filter out potential zero/negative similarities if needed
-            results = [(int(i), float(similarities[i])) for i in top_indices if similarities[i] > 0.0]
-            logger.debug(f"Semantic search returned {len(results)} results.")
+            # Format results: (index, score) tuples
+            results = [(int(i), float(similarities[i])) for i in top_indices_sorted]
+            # logger.debug(f"Semantic search returned {len(results)} candidates.") # Debug level
             return results
         except Exception as e:
              logger.error(f"Error during semantic search: {e}", exc_info=True)
              return []
 
     def _keyword_search(self, query: str, bm25_index: Optional[BM25Okapi], num_docs_in_corpus: int, top_n: int) -> List[Tuple[int, float]]:
-        """Performs keyword search using BM25 and returns (index, score) tuples."""
-        # (This method remains unchanged)
+        """Performs keyword search using the BM25 index."""
         if bm25_index is None:
-            logger.debug("Skipping keyword search due to missing BM25 index.")
+            # logger.debug("Skipping keyword search: BM25 index is missing.") # Debug level
             return []
         try:
+            # Tokenize query using the same function as for document indexing
             tokenized_query = tokenize_text(query)
             if not tokenized_query:
-                 logger.warning("Query tokenization resulted in empty query for keyword search.")
+                 logger.warning(f"Query '{query[:50]}...' became empty after tokenization. Skipping keyword search.")
                  return []
 
-            # Check for potential mismatch if num_docs_in_corpus provided differs
-            # It's better practice if the caller ensures consistency, but warning is good.
-            if hasattr(bm25_index, 'corpus_size') and num_docs_in_corpus != bm25_index.corpus_size:
-                 logger.warning(f"Num docs provided ({num_docs_in_corpus}) differs from BM25 corpus size ({bm25_index.corpus_size}). Using BM25 size for safety.")
-                 # It might be safer to rely on the index's reported size if available
-                 # num_docs_in_corpus = bm25_index.corpus_size # Or raise error
-
-            # BM25 scores can be negative for non-matching docs, get_scores gives all
+            # Get BM25 scores for the query against all documents
             doc_scores = bm25_index.get_scores(tokenized_query)
 
-            # Get top N overall scores
+            # Find top N indices efficiently using argpartition
             num_results = min(top_n, len(doc_scores))
             if num_results <= 0: return []
+            top_indices_unsorted = np.argpartition(doc_scores, -num_results)[-num_results:]
+            # Sort only the top N indices by score (descending)
+            top_indices_sorted = top_indices_unsorted[np.argsort(doc_scores[top_indices_unsorted])[::-1]]
 
-            # Using partition like in semantic search
-            actual_top_n = min(num_results, len(doc_scores))
-            if actual_top_n > 0:
-                 top_indices = np.argpartition(doc_scores, -actual_top_n)[-actual_top_n:]
-                 top_indices = top_indices[np.argsort(doc_scores[top_indices])[::-1]]
-            else:
-                 top_indices = np.array([], dtype=int)
-
-
-            # Create results list (index, score) - Optionally filter out scores <= 0
-            results = [(int(i), float(doc_scores[i])) for i in top_indices] # if doc_scores[i] > 0.0]
-            logger.debug(f"Keyword search returned {len(results)} results.")
+            # Format results: (index, score) tuples
+            results = [(int(i), float(doc_scores[i])) for i in top_indices_sorted]
+            # logger.debug(f"Keyword search returned {len(results)} candidates.") # Debug level
             return results
-
         except Exception as e:
              logger.error(f"Error during keyword search: {e}", exc_info=True)
              return []
 
     def _reciprocal_rank_fusion(self, ranked_lists: List[List[Tuple[int, float]]], k: int = 60) -> Dict[int, float]:
-        """Performs Reciprocal Rank Fusion (RRF) on multiple ranked lists."""
-        # (This method remains unchanged)
+        """Combines multiple ranked lists using Reciprocal Rank Fusion (RRF)."""
         fused_scores: Dict[int, float] = {}
         if not ranked_lists: return fused_scores
 
+        # logger.debug(f"Performing RRF (k={k}) on {len(ranked_lists)} lists...") # Debug level
         for rank_list in ranked_lists:
             if not rank_list: continue
-            seen_indices_in_list = set() # Avoid double counting from same list if duplicates somehow occur
-            for rank, (doc_index, _) in enumerate(rank_list):
-                 # Ensure doc_index is a valid integer before using
+            seen_indices_in_list = set()
+            for rank, (doc_index, _) in enumerate(rank_list): # rank starts at 0
                  if isinstance(doc_index, (int, np.integer)) and doc_index >= 0:
-                      doc_index_int = int(doc_index) # Convert numpy int if needed
+                      doc_index_int = int(doc_index)
                       if doc_index_int not in seen_indices_in_list:
-                           # RRF formula: score += 1 / (k + rank) where rank starts at 1
-                           # Since enumerate gives rank starting at 0, rank+1 is the correct rank value
+                           # RRF Formula: score += 1 / (k + rank + 1)
                            fused_scores[doc_index_int] = fused_scores.get(doc_index_int, 0.0) + (1.0 / (k + rank + 1))
                            seen_indices_in_list.add(doc_index_int)
-                      # else: # Optionally log duplicates within the same list
-                      #      logger.debug(f"Duplicate index {doc_index_int} found within a single ranked list during RRF.")
                  else:
-                      logger.warning(f"Skipping invalid or negative doc_index during RRF: {doc_index}")
+                      logger.warning(f"Skipping invalid doc_index ({doc_index}) during RRF.")
+        # logger.debug(f"Fusion generated {len(fused_scores)} scores.") # Debug level
         return fused_scores
 
     def recommend(self,
@@ -217,81 +188,69 @@ class Recommender:
                   keyword_candidates: int,
                   fusion_k: int,
                   top_n_final: int) -> List[Tuple[Dict[str, Any], float]]:
-        """Performs hybrid search and fuses results."""
-
+        """Orchestrates hybrid search: encode query, run searches, fuse, return top N."""
         if not resource_metadata:
-             logger.warning("No resource metadata provided for recommendation.")
+             logger.warning("Cannot recommend: Resource metadata is empty.")
              return []
 
-        logger.info(f"Generating hybrid recommendations for query: '{query}'")
+        logger.info(f"Starting hybrid recommendation for query: '{query[:100]}...'")
         num_docs = len(resource_metadata)
 
-        # 1. Encode Query using appropriate task type
+        # 1. Encode Query (using appropriate task type)
         query_embedding: Optional[np.ndarray] = None
+        # logger.debug(f"Encoding query (task_type='RETRIEVAL_QUERY').") # Debug level
         try:
-            # --- MODIFICATION START ---
-            logger.debug(f"Encoding query for semantic search (task_type='RETRIEVAL_QUERY').")
-            # Explicitly pass the task_type for query encoding
+            # Use 'RETRIEVAL_QUERY' task type for optimal query embeddings
             query_embedding = self.embed_model.encode(query, task_type="RETRIEVAL_QUERY")
-            # --- MODIFICATION END ---
-
-            if query_embedding is None:
-                 # Log error if encode returned None explicitly
-                 logger.error("Query embedding failed (returned None). Skipping semantic search.")
-            elif query_embedding.size == 0:
-                 # Handle case where encode might return an empty array
-                 logger.warning("Query embedding resulted in an empty array. Skipping semantic search.")
-                 query_embedding = None # Ensure it's None for semantic search check
-
+            if query_embedding is None or query_embedding.size == 0:
+                 logger.warning("Query encoding failed or resulted in empty vector. Semantic search disabled.")
+                 query_embedding = None # Ensure semantic search is skipped
         except Exception as e:
-             # Catch potential errors during the encode call itself
-             logger.error(f"An unexpected error occurred during query encoding: {e}", exc_info=True)
-             query_embedding = None # Ensure semantic search is skipped on error
+             logger.error(f"Error during query encoding: {e}", exc_info=True)
+             query_embedding = None # Skip semantic search on error
 
-        # 2. Perform Semantic Search
-        # This will naturally be skipped if query_embedding is None
+        # 2. Semantic Search
+        # logger.info(f"Performing semantic search (Top {semantic_candidates})...") # A bit verbose
         semantic_results = self._semantic_search(query_embedding, resource_embeddings, semantic_candidates)
+        logger.info(f"Semantic search returned {len(semantic_results)} candidates.")
 
-        # 3. Perform Keyword Search
+        # 3. Keyword Search
+        # logger.info(f"Performing keyword search (Top {keyword_candidates})...") # A bit verbose
         keyword_results = self._keyword_search(query, bm25_index, num_docs, keyword_candidates)
+        logger.info(f"Keyword search returned {len(keyword_results)} candidates.")
 
         # 4. Fuse Results
-        logger.info(f"Fusing results (Semantic candidates found: {len(semantic_results)}, Keyword candidates found: {len(keyword_results)})...")
-        lists_to_fuse = [lst for lst in [semantic_results, keyword_results] if lst] # Filter out empty lists
+        logger.info(f"Fusing search results (k={fusion_k})...")
+        lists_to_fuse = [lst for lst in [semantic_results, keyword_results] if lst]
         if not lists_to_fuse:
-             logger.warning("No candidates found from any search method after filtering.")
-             return [] # Return empty if both searches yielded nothing
+             logger.warning("No candidates found from any search method. Returning empty results.")
+             return []
 
         fused_scores = self._reciprocal_rank_fusion(lists_to_fuse, k=fusion_k)
-
-        # 5. Get Top N Fused Results
         if not fused_scores:
-             logger.warning("Fusion resulted in empty scores, though candidates existed.") # Should not happen if lists_to_fuse was not empty
+             logger.warning("Fusion resulted in empty scores dictionary. Returning empty results.")
              return []
-        # Sort the document indices based on their fused scores in descending order
+
+        # 5. Get Top N Fused Results (Sort by score)
+        # logger.debug(f"Sorting {len(fused_scores)} fused results...") # Debug level
         sorted_fused_indices = sorted(fused_scores.keys(), key=lambda idx: fused_scores[idx], reverse=True)
 
-        # 6. Format Final Results with Metadata
+        # 6. Format Final Output (Metadata + Score)
+        # logger.info(f"Retrieving metadata for top {top_n_final} results...") # Can be verbose
         final_results: List[Tuple[Dict[str, Any], float]] = []
         for rank, idx in enumerate(sorted_fused_indices):
-            # Stop adding results if we've reached the desired final count
-            if len(final_results) >= top_n_final:
-                break
-            # Validate index against metadata length
-            if 0 <= idx < num_docs:
+            if len(final_results) >= top_n_final: break # Stop once we have enough
+            if 0 <= idx < num_docs: # Check index validity
                 try:
                     metadata_item = resource_metadata[idx]
                     score = fused_scores[idx]
-                    # Ensure score is float, just in case
                     final_results.append((metadata_item, float(score)))
                 except IndexError:
-                     logger.error(f"IndexError accessing metadata at index {idx} even though it was within range [0, {num_docs-1}]. Skipping.")
+                     logger.error(f"IndexError accessing metadata at index {idx}. Skipping.")
                 except Exception as e:
-                     logger.error(f"Unexpected error formatting result for index {idx}: {e}", exc_info=True)
-
+                     logger.error(f"Error formatting result for index {idx}: {e}", exc_info=True)
             else:
-                # This case indicates an issue upstream (e.g., in fusion or indexing)
-                logger.warning(f"Fused index {idx} out of range [0, {num_docs-1}] for metadata. Skipping.")
+                logger.error(f"Invalid index {idx} encountered after fusion (range [0, {num_docs-1}]). Skipping.")
 
-        logger.info(f"Returning top {len(final_results)} fused recommendations.")
+        logger.info(f"Recommendation complete. Returning {len(final_results)} final results.")
         return final_results
