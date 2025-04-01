@@ -1,10 +1,78 @@
 # app.py
 import streamlit as st
+import nltk
+import ssl
 import os
 import sys
 import argparse # To mimic args for setup_data_and_fetch if needed
 from typing import Optional, Tuple, List, Dict, Any
 import traceback # For detailed error logging
+
+# --- Page Configuration (MUST BE THE FIRST STREAMLIT COMMAND) ---
+st.set_page_config(
+    page_title="ML Study Recommender",
+    page_icon="🧠", # Add a relevant emoji icon
+    layout="wide"
+)
+# --- End Page Configuration ---
+
+
+# --- NLTK Data Download on Startup ---
+# Attempt to bypass SSL verification issues sometimes found in containers
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    # Fallback for environments without this specific attribute
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+# Define required NLTK packages
+NLTK_PACKAGES = ['punkt', 'stopwords']
+download_needed = False
+# Use a flag within session state to avoid re-checking after successful download
+if 'nltk_data_checked' not in st.session_state:
+    st.session_state.nltk_data_checked = False
+
+if not st.session_state.nltk_data_checked:
+    # Use st.cache_data or st.cache_resource if appropriate, but simple check might be fine
+    # Using a spinner to show activity during potentially slow download
+    with st.spinner("Checking/downloading NLTK data..."):
+        all_packages_found = True
+        for package in NLTK_PACKAGES:
+            try:
+                # Check if already downloaded - adjust path based on resource type
+                if package == 'punkt':
+                    nltk.data.find(f'tokenizers/{package}')
+                elif package == 'stopwords':
+                     nltk.data.find(f'corpora/{package}')
+                print(f"INFO (app.py): NLTK package '{package}' found.")
+            except LookupError:
+                print(f"INFO (app.py): NLTK package '{package}' not found. Triggering download.")
+                download_needed = True
+                try:
+                    # Attempt download
+                    nltk.download(package, quiet=True)
+                    print(f"INFO (app.py): NLTK '{package}' download attempt finished.")
+                    # Verify again
+                    if package == 'punkt':
+                        nltk.data.find(f'tokenizers/{package}')
+                    elif package == 'stopwords':
+                        nltk.data.find(f'corpora/{package}')
+                    print(f"INFO (app.py): NLTK '{package}' found after download attempt.")
+                except Exception as e:
+                    # Display error prominently in Streamlit if download fails
+                    st.error(f"Fatal Error: Failed to download required NLTK package '{package}'. App cannot continue. Error: {e}")
+                    print(f"ERROR (app.py): NLTK '{package}' download failed: {e}")
+                    all_packages_found = False
+                    st.stop() # Stop execution if essential data is missing
+        if download_needed:
+            print("INFO (app.py): NLTK download process completed.")
+        # Mark as checked only if all packages were successfully found/downloaded
+        if all_packages_found:
+            st.session_state.nltk_data_checked = True
+# --- End NLTK Data Download ---
+
 
 # --- Path Setup ---
 # Ensure this points to your project root correctly
@@ -15,14 +83,18 @@ project_root = os.path.dirname(script_dir) # Assumes app.py is in scripts/
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 print(f"Project Root added to sys.path: {project_root}") # Debug print
+# --- End Path Setup ---
+
 
 # --- Import Refactored Logic ---
 # Assuming these functions are refactored to be callable (no print/exit)
+# These imports MUST come AFTER the NLTK download block above
 try:
     from hybrid_search_rag import config
+    # Import necessary functions, likely from cli.py or ideally refactored modules
     from scripts.cli import (
         load_components,
-        check_nltk_data,
+        # check_nltk_data, # <-- REMOVED: No longer needed from here for app.py
         run_recommendation,
         setup_data_and_fetch,
         run_arxiv_search,
@@ -41,16 +113,12 @@ except Exception as e:
     st.exception(e)
     st.error("An unexpected error occurred during imports.")
     st.stop()
+# --- End Import Refactored Logic ---
 
-# --- Page Configuration (Wide Layout) ---
-st.set_page_config(
-    page_title="ML Study Recommender",
-    page_icon="🧠", # Add a relevant emoji icon
-    layout="wide"
-)
 
 # --- Title and Introduction ---
 # Mimic the header style somewhat with title and markdown
+# NOTE: set_page_config was moved higher up
 st.title("🧠 ML Study Recommender")
 st.markdown("""
 Explore academic research effortlessly. This tool uses advanced AI (RAG & Hybrid Search)
@@ -66,8 +134,10 @@ def cached_load_components():
     print("Attempting to load components via Streamlit cache...")
     try:
         # Assuming load_components uses/populates globals in cli.py
+        # NLTK data should be present now due to the block at the top of app.py
         load_components(force_reload=False)
         # Indirect check (needs access to globals or return value)
+        # This check might still rely on the global state in cli.py, which isn't ideal
         from scripts.cli import loaded_metadata # Example check
         if loaded_metadata is not None:
              print("Components loaded successfully (checked metadata).")
@@ -82,27 +152,9 @@ def cached_load_components():
         print(f"Error loading RAG components: {traceback.format_exc()}")
         return False
 
-@st.cache_data # Cache simple checks like NLTK data
-def cached_check_nltk_data():
-    """Checks and potentially downloads required NLTK data."""
-    print("Checking NLTK data via Streamlit cache...")
-    try:
-        # Assuming check_nltk_data is refactored to not sys.exit()
-        check_nltk_data()
-        print("NLTK check complete.")
-    except SystemExit:
-         st.error("NLTK data download/verification failed. Check terminal logs.")
-         st.stop()
-    except Exception as e:
-        st.error(f"Error during NLTK check:")
-        st.exception(e)
-        print(f"Error during NLTK check: {traceback.format_exc()}")
-        st.stop()
-
 # --- Initial Setup ---
 # Run checks and component loading early
-cached_check_nltk_data()
-components_loaded = cached_load_components()
+components_loaded = cached_load_components() # This now relies on NLTK data being downloaded by the block at the top
 
 if not components_loaded:
     st.error("Core RAG components failed to load. Recommendation functionality will be disabled.")
@@ -193,11 +245,11 @@ with tab_how:
 
     with col2_how:
         st.subheader("2. Hybrid Indexing")
-        st.markdown("""
-        * Generates dense vector embeddings (e.g., `BAAI/bge-large-en-v1.5`) for semantic understanding.
+        st.markdown(f"""
+        * Generates dense vector embeddings (e.g., `{config.EMBEDDING_MODEL_NAME}`) for semantic understanding.
         * Builds a sparse keyword index (BM25) for term matching.
         * Indexes are persisted locally.
-        """)
+        """) # Updated model name here
         st.subheader("5. RAG Pipeline")
         st.markdown("""
         * The entire process forms a RAG pipeline.
@@ -221,12 +273,10 @@ with tab_how:
     st.divider()
 
 # --- About Tab ---
+# (About Tab section remains the same)
 with tab_about:
     st.header("About This Project")
-
-    # Use columns for better layout
     col1_about, col2_about = st.columns(2)
-
     with col1_about:
         st.subheader("Project Goal")
         st.markdown("""
@@ -234,7 +284,6 @@ with tab_about:
         primarily focusing on Machine Learning research papers, with future goals for personalization and
         resource recommendation.
         """)
-
         st.subheader("Current Status")
         st.markdown("""
         The project functions as a sophisticated RAG tool capable of ingesting various document types
@@ -242,15 +291,12 @@ with tab_about:
         with citations based on the indexed content. Key features like hybrid search, chunking,
         LLM integration (Gemini), and dynamic source finding are implemented.
         """)
-
         st.subheader("Developer")
         st.markdown(f"""
         This project is developed by **Felix Nathaniel**, a Computer Science student at BINUS University,
         as part of ongoing learning and exploration in AI/ML.
         *(Powered by Streamlit)*
         """)
-
-
     with col2_about:
         st.subheader("Future Work")
         st.markdown("""
@@ -261,16 +307,14 @@ with tab_about:
         * **Refine UI/UX:** Continuously improve the web interface.
         * **(Maybe) API Endpoint:** Create a dedicated API for broader integration.
         """)
-
     st.divider()
 
 
 # --- Fetch Data Tab ---
+# (Fetch Data Tab section remains the same)
 with tab_fetch:
     st.header("Update Knowledge Base")
     st.warning("Fetching and processing can take significant time and requires internet access.", icon="⏳")
-
-    # Use a form to group inputs for the fetch operation
     with st.form("fetch_form"):
         st.subheader("Source Selection")
         fetch_method = st.radio(
@@ -279,29 +323,23 @@ with tab_fetch:
              "Use Custom arXiv Query",
              "Use LLM Suggestion (Requires Topic)"),
             key="fetch_method",
-            horizontal=True # Make radio buttons horizontal
+            horizontal=True
         )
-
-        # Layout inputs using columns
         col1_fetch, col2_fetch = st.columns(2)
         with col1_fetch:
             custom_arxiv_query = st.text_input("Custom arXiv Query:", key="fetch_arxiv_query", help="Used if 'Custom arXiv Query' is selected.")
             topic = st.text_input("Topic for LLM Suggestion:", key="fetch_topic", help="Used if 'LLM Suggestion' is selected.")
         with col2_fetch:
             num_arxiv_results = st.number_input(f"Max arXiv Results:", min_value=5, max_value=500, value=config.MAX_ARXIV_RESULTS, key="fetch_num_arxiv", help="Applies to default, custom, or suggested query.")
-
         st.divider()
         submitted_fetch = st.form_submit_button("Fetch and Process Data", type="primary", use_container_width=True)
 
         if submitted_fetch:
-            # Prepare arguments namespace for setup_data_and_fetch
             fetch_args = argparse.Namespace()
             fetch_args.suggest_sources = (fetch_method == "Use LLM Suggestion (Requires Topic)")
             fetch_args.topic = topic if fetch_args.suggest_sources else None
             fetch_args.arxiv_query = custom_arxiv_query if fetch_method == "Use Custom arXiv Query" else None
             fetch_args.num_arxiv = num_arxiv_results
-
-            # Input Validation
             valid_input = True
             if fetch_args.suggest_sources and not fetch_args.topic:
                 st.error("Topic is required when using LLM Suggestion.")
@@ -314,33 +352,28 @@ with tab_fetch:
                 st.info("Starting data fetch and processing... See terminal for detailed logs.")
                 with st.spinner("Fetching sources, chunking, embedding, indexing... Please wait."):
                     try:
-                        # Call the backend function
                         status_message = setup_data_and_fetch(fetch_args)
-
-                        # Display result and handle component reload
                         if status_message.lower().startswith("success"):
                             st.success(f"Fetch Successful: {status_message}")
                             st.info("Clearing component cache and reloading...")
                             # --- IMPORTANT: Reload components ---
-                            cached_load_components.clear() # Clear the cache
-                            # Rerun the script to force reload and reflect changes
-                            st.rerun()
+                            # Use clear() method directly on the cached function
+                            cached_load_components.clear()
+                            st.rerun() # Rerun the script to force reload
                         elif status_message.lower().startswith("error"):
                             st.error(f"Fetch Failed: {status_message}")
                         else:
                             st.warning(f"Fetch Status: {status_message}")
-
                     except Exception as e:
                         st.error(f"An critical error occurred during data fetching/processing:")
                         st.exception(e)
                         print(f"Fetch Error: {traceback.format_exc()}")
 
 # --- Search arXiv Tab ---
+# (Search arXiv Tab section remains the same)
 with tab_arxiv:
     st.header("Direct arXiv Search")
     st.markdown("Perform a live search directly on arXiv.org.")
-
-    # Layout inputs using columns
     col1_arxiv, col2_arxiv = st.columns([3, 1])
     with col1_arxiv:
         arxiv_query = st.text_input("Search query for arXiv:", key="arxiv_query_input", label_visibility="collapsed", placeholder="Enter arXiv search query...")
@@ -354,30 +387,27 @@ with tab_arxiv:
             st.info(f"Searching arXiv for '{arxiv_query}'...")
             with st.spinner("Searching arXiv..."):
                 try:
-                    # Call the backend function
                     results = run_arxiv_search(arxiv_query, num_results)
-
                     if not results:
                         st.info("No results found on arXiv for this query.")
                     else:
                         st.subheader(f"Found {len(results)} results:")
-                        # Display results more cleanly
                         for i, paper in enumerate(results):
                             st.markdown(f"**{i + 1}. {paper.get('title', 'N/A')}**")
                             st.caption(f"Authors: {', '.join(paper.get('authors', [])) or 'N/A'} | Published: {paper.get('published', 'N/A')}")
                             pdf_url = paper.get('pdf_url')
                             if pdf_url and pdf_url != '#':
-                                st.link_button("View PDF", pdf_url) # Use link_button
+                                st.link_button("View PDF", pdf_url)
                             with st.expander("Show Abstract"):
                                 st.write(paper.get('summary', 'N/A'))
-                            st.divider() # Visual separator
-
+                            st.divider()
                 except Exception as e:
                     st.error(f"An error occurred during arXiv search:")
                     st.exception(e)
                     print(f"arXiv Search Error: {traceback.format_exc()}")
 
 # --- Footer ---
+# (Footer section remains the same)
 st.divider()
 st.markdown("<div style='text-align: center; color: grey;'>© 2025 Felix Nathaniel | ML Study Recommender</div>", unsafe_allow_html=True)
 

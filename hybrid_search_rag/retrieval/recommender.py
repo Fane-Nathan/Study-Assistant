@@ -63,8 +63,6 @@ def _check_and_load_nltk_data():
     else:
         NLTK_STOPWORDS = set() # Fallback if download failed
 
-_check_and_load_nltk_data() # Run check on module import
-
 # --- Tokenizer for BM25 ---
 # (tokenize_text function remains unchanged - assuming it's correct)
 def tokenize_text(text: str) -> List[str]:
