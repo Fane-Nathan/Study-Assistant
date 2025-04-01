@@ -24,4 +24,3 @@ env/
 .DS_Store
 Thumbs.db
 .qodo
-nltk_data/
