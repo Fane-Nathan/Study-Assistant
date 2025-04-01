@@ -27,28 +27,26 @@ except AttributeError:
 else:
     ssl._create_default_https_context = _create_unverified_https_context
 
-# Define required NLTK packages - CHANGED 'punkt' to 'punkt_tab'
-NLTK_PACKAGES = ['punkt_tab', 'stopwords'] # <-- MODIFIED HERE
-download_needed = False
+# Define required NLTK packages - Ensure 'punkt_tab' is included
+NLTK_PACKAGES = ['punkt_tab', 'stopwords']
+download_needed_flag = False # Renamed to avoid conflict later
 # Use a flag within session state to avoid re-checking after successful download
 if 'nltk_data_checked' not in st.session_state:
     st.session_state.nltk_data_checked = False
 
 if not st.session_state.nltk_data_checked:
-    # Use st.cache_data or st.cache_resource if appropriate, but simple check might be fine
     # Using a spinner to show activity during potentially slow download
     with st.spinner("Checking/downloading NLTK data..."):
         all_packages_found = True
         for package in NLTK_PACKAGES:
             package_path = ""
             # Determine the correct path based on package type
-            if package == 'punkt_tab': # <-- MODIFIED HERE
+            if package == 'punkt_tab':
                 package_path = f'tokenizers/{package}'
             elif package == 'stopwords':
                  package_path = f'corpora/{package}'
             else:
-                # Handle potential future additions, though find might work anyway
-                package_path = package
+                package_path = package # Fallback for other potential types
 
             try:
                 # Check if already downloaded
@@ -56,10 +54,10 @@ if not st.session_state.nltk_data_checked:
                 print(f"INFO (app.py): NLTK package '{package}' found.")
             except LookupError:
                 print(f"INFO (app.py): NLTK package '{package}' not found. Triggering download.")
-                download_needed = True
+                download_needed_flag = True
                 try:
-                    # Attempt download - Use the 'package' name which is 'punkt_tab' now
-                    nltk.download(package, quiet=True) # <-- Uses 'punkt_tab' when package is 'punkt_tab'
+                    # Attempt download
+                    nltk.download(package, quiet=True)
                     print(f"INFO (app.py): NLTK '{package}' download attempt finished.")
                     # Verify again using the correct path
                     nltk.data.find(package_path)
@@ -68,103 +66,140 @@ if not st.session_state.nltk_data_checked:
                     # Display error prominently in Streamlit if download fails
                     st.error(f"Fatal Error: Failed to download required NLTK package '{package}'. App cannot continue. Error: {e}")
                     print(f"ERROR (app.py): NLTK '{package}' download failed: {e}")
+                    traceback.print_exc() # Print full traceback to logs
                     all_packages_found = False
                     st.stop() # Stop execution if essential data is missing
+            except Exception as E_find: # Catch other potential errors during find
+                 st.error(f"Fatal Error checking for NLTK package '{package}'. App cannot continue. Error: {E_find}")
+                 print(f"ERROR (app.py): NLTK '{package}' check failed: {E_find}")
+                 traceback.print_exc() # Print full traceback to logs
+                 all_packages_found = False
+                 st.stop()
 
-        if download_needed:
+
+        if download_needed_flag:
             print("INFO (app.py): NLTK download process completed.")
         # Mark as checked only if all packages were successfully found/downloaded
         if all_packages_found:
             st.session_state.nltk_data_checked = True
+            print("INFO (app.py): NLTK session state marked as checked.")
+        else:
+             print("ERROR (app.py): Not all NLTK packages were found/downloaded successfully.")
+             st.error("Failed to prepare all required NLTK packages. App may not function correctly.")
+             # Decide if you want to st.stop() here even if some downloads failed but others succeeded
+# --- End NLTK Data Download ---
 
 # --- Path Setup ---
-# Ensure this points to your project root correctly
+# (Ensure this is correct for your deployment structure)
+print("INFO (app.py): Setting up sys.path...")
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(script_dir) # Assumes app.py is in scripts/
-# If app.py is in the root:
-# project_root = os.path.dirname(os.path.abspath(__file__))
+# project_root = os.path.dirname(script_dir) # Use this if app.py is in scripts/
+project_root = os.path.dirname(os.path.abspath(__file__)) # Use this if app.py is in the project root
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-print(f"Project Root added to sys.path: {project_root}") # Debug print
+print(f"Project Root added to sys.path: {project_root}")
+print(f"Current sys.path: {sys.path}") # More detailed debug print
 # --- End Path Setup ---
 
 
-# --- Import Refactored Logic ---
-# Assuming these functions are refactored to be callable (no print/exit)
-# These imports MUST come AFTER the NLTK download block above
+# --- DELAYED Import Refactored Logic ---
+# These imports happen AFTER NLTK download check and path setup
+print("INFO (app.py): Attempting project module imports...") # Debug print
 try:
     from hybrid_search_rag import config
-    # Import necessary functions, likely from cli.py or ideally refactored modules
     from scripts.cli import (
         load_components,
-        # check_nltk_data, # <-- REMOVED: No longer needed from here for app.py
         run_recommendation,
         setup_data_and_fetch,
         run_arxiv_search,
-        # We need access to the loaded components, assuming they are global in cli.py
-        # This is not ideal, better if load_components returned them.
-        # For now, we might need to import them if used directly, or trust load_components worked.
-        # Example: from scripts.cli import loaded_metadata
+        # You might need to access globals set by load_components later
+        # E.g. directly, or preferably by modifying load_components to return them
     )
+    print("INFO (app.py): Project module imports successful.") # Debug print
 except ImportError as e:
-    # Use st.exception for better error display in Streamlit
     st.exception(e)
-    st.error(f"Failed to import project modules. Check sys.path and ensure refactoring is complete.")
-    st.code(f"sys.path: {sys.path}")
+    st.error(f"Failed to import project modules (ImportError). Check sys.path and module structure.")
+    st.code(f"Current sys.path: {sys.path}") # Show path in UI on error
+    print(f"ERROR (app.py): Project import failed (ImportError): {e}")
+    traceback.print_exc()
     st.stop()
 except Exception as e:
     st.exception(e)
-    st.error("An unexpected error occurred during imports.")
+    st.error(f"An unexpected error occurred during project imports: {e}")
+    print(f"ERROR (app.py): Project import failed (Exception): {e}")
+    traceback.print_exc()
     st.stop()
-# --- End Import Refactored Logic ---
+# --- End DELAYED Import Refactored Logic ---
 
 
 # --- Title and Introduction ---
-# Mimic the header style somewhat with title and markdown
-# NOTE: set_page_config was moved higher up
 st.title("🧠 ML Study Recommender")
 st.markdown("""
 Explore academic research effortlessly. This tool uses advanced AI (RAG & Hybrid Search)
 to find relevant information, answer your questions from research papers, and provide cited summaries.
 """)
-st.divider() # Visual separator
+st.divider()
 
 # --- Caching Components ---
-# Use st.cache_resource for expensive, non-serializable objects like models
+# Define the caching function here
 @st.cache_resource
 def cached_load_components():
     """Loads and caches the core RAG components."""
-    print("Attempting to load components via Streamlit cache...")
+    # This function should NOT call nltk.download. Assumes data is present.
+    print("INFO (app.py): Attempting to load components via cached_load_components...")
     try:
-        # Assuming load_components uses/populates globals in cli.py
-        # NLTK data should be present now due to the block at the top of app.py
-        load_components(force_reload=False)
-        # Indirect check (needs access to globals or return value)
-        # This check might still rely on the global state in cli.py, which isn't ideal
-        from scripts.cli import loaded_metadata # Example check
+        # Pass necessary config if load_components needs it, e.g., load_components(config=config)
+        load_components(force_reload=False) # Assuming this sets up necessary globals in cli.py
+
+        # If load_components doesn't use globals, it should RETURN the components. Example:
+        # metadata, vector_store, llm_interface = load_components(force_reload=False)
+        # return metadata, vector_store, llm_interface
+
+        # Example check if relying on globals (less ideal):
+        from scripts.cli import loaded_metadata
         if loaded_metadata is not None:
-             print("Components loaded successfully (checked metadata).")
-             return True
+             print("INFO (app.py): Components loaded successfully (checked metadata).")
+             # If load_components returns values, return them here instead of True
+             return True # Or return the actual components
         else:
-             print("Components seem not loaded after function call.")
+             print("WARN (app.py): Components seem not loaded after function call (metadata is None).")
              st.warning("Component loading function ran but components appear missing.")
              return False
+    except NameError as ne:
+         st.error(f"Error loading RAG components: Likely a problem accessing state from 'scripts.cli'. Did load_components run correctly? Error: {ne}")
+         st.exception(ne)
+         print(f"ERROR (app.py): NameError during component loading: {ne}")
+         traceback.print_exc()
+         return False
     except Exception as e:
         st.error(f"Error loading RAG components:")
         st.exception(e) # Show full traceback in Streamlit UI
-        print(f"Error loading RAG components: {traceback.format_exc()}")
+        print(f"ERROR (app.py): Exception during component loading: {e}")
+        traceback.print_exc()
         return False
 
+
 # --- Initial Setup ---
-# Run checks and component loading early
-components_loaded = cached_load_components() # This now relies on NLTK data being downloaded by the block at the top
+# CALL component loading AFTER NLTK check and project imports
+print("INFO (app.py): Calling cached_load_components...")
+components_load_status = cached_load_components()
+print(f"INFO (app.py): Components loaded status: {components_load_status}")
+
+# Adjust this check based on what cached_load_components actually returns
+# If it returns True/False:
+components_loaded = components_load_status
+# If it returns the components themselves or None on failure:
+# components = components_load_status
+# components_loaded = components is not None
 
 if not components_loaded:
     st.error("Core RAG components failed to load. Recommendation functionality will be disabled.")
-    # Allow app to continue for other tabs like Fetch/Search
+    # Allow app to continue? Or st.stop()? Depends on requirements.
+
 
 # --- UI Tabs ---
-# Use relevant emojis for tabs
+# Define tabs AFTER component loading attempt
+print("INFO (app.py): Defining UI tabs...")
 tab_rec, tab_how, tab_about, tab_fetch, tab_arxiv = st.tabs([
     "🧠 Recommend",
     "⚙️ How It Works",
@@ -172,18 +207,17 @@ tab_rec, tab_how, tab_about, tab_fetch, tab_arxiv = st.tabs([
     "⏬ Fetch Data",
     "🔍 Search arXiv"
 ])
+print("INFO (app.py): UI tabs defined.")
 
 # --- Recommendation Tab ---
 with tab_rec:
+    # (Your existing Recommendation Tab content here)
+    # Make sure run_recommendation can access necessary components/globals
     st.header("Ask the RAG Assistant")
     st.markdown("Enter your topic or question below and get a cited answer based on the indexed documents.")
-
-    # Use columns for better layout of controls
-    col1_rec, col2_rec = st.columns([3, 1]) # Give more space to text area
-
+    col1_rec, col2_rec = st.columns([3, 1])
     with col1_rec:
         query = st.text_area("Your Question:", value=config.DEFAULT_QUERY, height=150, key="rec_query", label_visibility="collapsed")
-
     with col2_rec:
         general_mode = st.checkbox("Hybrid Mode", value=False, key="rec_general", help="Allow LLM to use its general knowledge alongside retrieved documents.")
         concise_mode = st.checkbox("Concise Prompt", value=True, key="rec_concise", help="Use a more structured, concise prompt template for the LLM.")
@@ -192,36 +226,31 @@ with tab_rec:
     if submit_rec:
         if not query:
             st.warning("Please enter a question.")
+        elif not components_loaded:
+             st.error("Cannot get recommendation: Core components failed to load.")
         else:
             mode_name = "Hybrid" if general_mode else "Strict"
             style_name = "Concise/Structured" if concise_mode else "Default/Detailed"
             st.info(f"Running recommendation ({mode_name} RAG, {style_name} Prompt)...")
-
             with st.spinner("Retrieving context and generating response..."):
                 try:
-                    # Call the backend function
                     answer, sources = run_recommendation(query, config.TOP_N_RESULTS, general_mode, concise_mode)
-
                     st.subheader("Assistant Response")
                     if answer:
-                        # Use markdown to render formatting from the LLM response
-                        st.markdown(answer, unsafe_allow_html=True) # Allow basic HTML if needed for citations/links
+                        st.markdown(answer, unsafe_allow_html=True)
                     else:
                         st.warning("No response was generated by the LLM or fallback mechanism.")
-
-                    # Put sources in an expander
                     with st.expander("Show Context Sources Provided to LLM"):
                         if sources:
-                            # Display sources as a numbered list using markdown
                             source_markdown = "\n".join([f"{i+1}. {s.strip()}" for i, s in enumerate(sources)])
                             st.markdown(source_markdown)
                         else:
                             st.info("No relevant local document chunks were found or provided as context.")
-
                 except Exception as e:
                     st.error(f"An error occurred during recommendation:")
-                    st.exception(e) # Show traceback in UI
+                    st.exception(e)
                     print(f"Recommendation Error: {traceback.format_exc()}")
+
 
 # --- How It Works Tab ---
 with tab_how:
