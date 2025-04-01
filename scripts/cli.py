@@ -7,24 +7,68 @@ Default mode: Strict RAG (answers only from local docs).
 
 import argparse
 import logging
+import ssl
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
 import sys
+import nltk
 import arxiv
-import nltk # Import nltk for data check
+import streamlit as st
+import textwrap
+import traceback
 import numpy as np
 from typing import Optional, Tuple, List, Dict, Any, Union
-import textwrap
 
-# --- Add NLTK data path ---
-# Ensure NLTK looks for data in the bundled directory first
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-nltk_data_dir = os.path.join(project_root, 'nltk_data')
-if os.path.exists(nltk_data_dir):
-    nltk.data.path.append(nltk_data_dir)
-    print(f"INFO: Appended NLTK data path: {nltk_data_dir}") # Add print/log for confirmation
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+# --- NLTK Data Download on Startup ---
+# Attempt to bypass SSL verification issues sometimes found in containers
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    # Fallback for environments without this specific attribute
+    pass
 else:
-    print(f"WARNING: nltk_data directory not found at {nltk_data_dir}. NLTK might attempt download.")
+    ssl._create_default_https_context = _create_unverified_https_context
+
+# Define required NLTK packages
+NLTK_PACKAGES = ['punkt', 'stopwords']
+download_needed = False
+# Use a flag within session state to avoid re-checking after successful download
+if 'nltk_data_checked' not in st.session_state:
+    st.session_state.nltk_data_checked = False
+
+if not st.session_state.nltk_data_checked:
+    with st.spinner("Checking NLTK data..."): # Show a spinner during check/download
+        for package in NLTK_PACKAGES:
+            try:
+                # Check if already downloaded - adjust path based on resource type
+                if package == 'punkt':
+                    nltk.data.find(f'tokenizers/{package}')
+                elif package == 'stopwords':
+                     nltk.data.find(f'corpora/{package}')
+                print(f"INFO (app.py): NLTK package '{package}' found.")
+            except LookupError:
+                print(f"INFO (app.py): NLTK package '{package}' not found. Triggering download.")
+                download_needed = True
+                try:
+                    # Attempt download
+                    nltk.download(package, quiet=True)
+                    print(f"INFO (app.py): NLTK '{package}' download attempt finished.")
+                    # Verify again
+                    if package == 'punkt':
+                        nltk.data.find(f'tokenizers/{package}')
+                    elif package == 'stopwords':
+                        nltk.data.find(f'corpora/{package}')
+                    print(f"INFO (app.py): NLTK '{package}' found after download attempt.")
+                except Exception as e:
+                    # Display error prominently in Streamlit if download fails
+                    st.error(f"Fatal Error: Failed to download required NLTK package '{package}'. Cannot continue. Error: {e}")
+                    print(f"ERROR (app.py): NLTK '{package}' download failed: {e}")
+                    # Stop the app if critical data is missing
+                    st.stop() # Stop execution if essential data is missing
+        if download_needed:
+            print("INFO (app.py): NLTK download process completed.")
+        # Mark as checked so it doesn't run every time
+        st.session_state.nltk_data_checked = True
 
 # --- Define logger at Module Level ---
 # This makes 'logger' accessible to all functions in this file
@@ -40,6 +84,12 @@ if project_root not in sys.path:
 # --- Import Project Modules (Order matters sometimes) ---
 try:
     from hybrid_search_rag import config
+    from scripts.cli import (
+        load_components,
+        run_recommendation,
+        setup_data_and_fetch,
+        run_arxiv_search,
+    )
     from hybrid_search_rag.data.resource_fetcher import fetch_arxiv_papers, crawl_and_fetch_web_articles
     from hybrid_search_rag.retrieval.embedding_model_gemini import EmbeddingModel # New
     from hybrid_search_rag.data.data_manager import DataManager
