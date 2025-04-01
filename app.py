@@ -27,8 +27,8 @@ except AttributeError:
 else:
     ssl._create_default_https_context = _create_unverified_https_context
 
-# Define required NLTK packages
-NLTK_PACKAGES = ['punkt', 'stopwords']
+# Define required NLTK packages - CHANGED 'punkt' to 'punkt_tab'
+NLTK_PACKAGES = ['punkt_tab', 'stopwords'] # <-- MODIFIED HERE
 download_needed = False
 # Use a flag within session state to avoid re-checking after successful download
 if 'nltk_data_checked' not in st.session_state:
@@ -40,25 +40,29 @@ if not st.session_state.nltk_data_checked:
     with st.spinner("Checking/downloading NLTK data..."):
         all_packages_found = True
         for package in NLTK_PACKAGES:
+            package_path = ""
+            # Determine the correct path based on package type
+            if package == 'punkt_tab': # <-- MODIFIED HERE
+                package_path = f'tokenizers/{package}'
+            elif package == 'stopwords':
+                 package_path = f'corpora/{package}'
+            else:
+                # Handle potential future additions, though find might work anyway
+                package_path = package
+
             try:
-                # Check if already downloaded - adjust path based on resource type
-                if package == 'punkt':
-                    nltk.data.find(f'tokenizers/{package}')
-                elif package == 'stopwords':
-                     nltk.data.find(f'corpora/{package}')
+                # Check if already downloaded
+                nltk.data.find(package_path)
                 print(f"INFO (app.py): NLTK package '{package}' found.")
             except LookupError:
                 print(f"INFO (app.py): NLTK package '{package}' not found. Triggering download.")
                 download_needed = True
                 try:
-                    # Attempt download
-                    nltk.download(package, quiet=True)
+                    # Attempt download - Use the 'package' name which is 'punkt_tab' now
+                    nltk.download(package, quiet=True) # <-- Uses 'punkt_tab' when package is 'punkt_tab'
                     print(f"INFO (app.py): NLTK '{package}' download attempt finished.")
-                    # Verify again
-                    if package == 'punkt':
-                        nltk.data.find(f'tokenizers/{package}')
-                    elif package == 'stopwords':
-                        nltk.data.find(f'corpora/{package}')
+                    # Verify again using the correct path
+                    nltk.data.find(package_path)
                     print(f"INFO (app.py): NLTK '{package}' found after download attempt.")
                 except Exception as e:
                     # Display error prominently in Streamlit if download fails
@@ -66,13 +70,12 @@ if not st.session_state.nltk_data_checked:
                     print(f"ERROR (app.py): NLTK '{package}' download failed: {e}")
                     all_packages_found = False
                     st.stop() # Stop execution if essential data is missing
+
         if download_needed:
             print("INFO (app.py): NLTK download process completed.")
         # Mark as checked only if all packages were successfully found/downloaded
         if all_packages_found:
             st.session_state.nltk_data_checked = True
-# --- End NLTK Data Download ---
-
 
 # --- Path Setup ---
 # Ensure this points to your project root correctly
