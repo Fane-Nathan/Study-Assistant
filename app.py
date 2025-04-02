@@ -288,13 +288,12 @@ with tab_about:
     * **Tune Retrieval:** Systematically evaluate and optimize retrieval performance.
     * **Implement Recommender Features:** Add proactive topic suggestions.
     * **Add Personalization:** Incorporate user profiles, history, etc.
-    * **Refine UI/UX:** Continuously improve the web interface.
     * **(Maybe) API Endpoint:** Create a dedicated API for broader integration.
     """)
 
     st.subheader("Developer")
     st.markdown(f"""
-    This project is developed by **Felix Nathaniel**, **Reynaldi Anatyo**, & **Dennison Soebdibjo** a Computer Science student at BINUS University,
+    This project is developed by **Felix Nathaniel**, **Reynaldi Anatyo**, & **Dennison Soedibjo** a Computer Science student at BINUS University,
     as part of ongoing learning and exploration in AI/ML.
     """)
     st.caption("*(Powered by Streamlit)*") # Moved caption slightly
@@ -418,4 +417,4 @@ with tab_feedback:
 # --- Footer ---
 # (Footer remains here - unchanged)
 st.divider()
-st.markdown("<div style='text-align: center; color: grey;'>© 2025 Felix Nathaniel, Reynaldi Anatyo, Dennison Soebdibjo | Research Paper Assistant</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align: center; color: grey;'>© 2025 Felix Nathaniel, Reynaldi Anatyo, Dennison Soedibjo | Research Paper Assistant</div>", unsafe_allow_html=True)
