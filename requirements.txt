@@ -24,7 +24,6 @@ lxml # Explicit dependency for readability-lxml
 trafilatura # For advanced HTML text extraction
 cachetools # For caching fetched resources
 pybloom-live # For the Bloom filter in the crawler's visited set
-pybloom
 
 # Keyword Search
 rank_bm25 # For BM25 indexing
