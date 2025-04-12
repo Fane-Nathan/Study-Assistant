@@ -370,7 +370,7 @@ with tab_about:
         st.markdown("""
         * **Corpus Expansion:** Curate and index a larger, more diverse set of relevant papers.
         * **Evaluation & Tuning:** Systematically evaluate retrieval and generation quality.
-        * **Recommender System:** Proactively suggest relevant papers or topics based on user queries or profiles (*Your interest area, Felix!*).
+        * **Recommender System:** Proactively suggest relevant papers or topics based on user queries or profiles
         * **Personalization:** Allow user profiles, history tracking, and preference settings.
         * **Deployment:** Explore options for more robust deployment.
         """)
@@ -382,9 +382,6 @@ with tab_about:
         *Computer Science Students at BINUS University, exploring the fascinating world of AI and Information Retrieval.*
         """)
         st.link_button("View Project on GitHub", "https://github.com/Fane-Nathan/Study-Assistant") # Add link button
-
-    st.divider()
-    st.caption("*(Powered by Streamlit & Python)*")
 # --- End About Tab ---
 
 
@@ -619,7 +616,7 @@ st.markdown(
     """
     <div style='text-align: center; color: grey; font-size: 0.9em;'>
         © 2025 Felix Nathaniel, Reynaldi Anatyo, Dennison Soedibjo | BINUS University Computer Science <br>
-        Research Paper Assistant - Built with Streamlit
+        Research Paper Assistant
     </div>
     """,
     unsafe_allow_html=True
