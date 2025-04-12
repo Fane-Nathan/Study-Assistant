@@ -17,7 +17,7 @@ import arxiv
 import fitz
 from bs4 import BeautifulSoup
 from cachetools import LRUCache
-from pybloom import BloomFilter
+from pybloom_live import BloomFilter
 from readability import Document as ReadabilityDocument
 from prometheus_client import Counter, Histogram
 from trafilatura import extract
