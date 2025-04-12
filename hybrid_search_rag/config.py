@@ -33,8 +33,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # --- NEW: Vertex AI Configuration ---
 # We're using Vertex AI for embeddings now. Need the Google Cloud Project ID and location.
-VERTEX_AI_PROJECT = os.getenv("VERTEX_AI_PROJECT") # Your Google Cloud Project ID
-VERTEX_AI_LOCATION = os.getenv("VERTEX_AI_LOCATION", "us-central1") # Your GCP region, default 'us-central1' seems reasonable.
+# VERTEX_AI_PROJECT = os.getenv("VERTEX_AI_PROJECT") # Your Google Cloud Project ID
+# VERTEX_AI_LOCATION = os.getenv("VERTEX_AI_LOCATION", "us-central1") # Your GCP region, default 'us-central1' seems reasonable.
 
 # --- Model Settings ---
 # Embedding model (Semantic Search) - Specifies WHICH model to use for turning text into vectors.

@@ -1,25 +1,52 @@
-# requirements.txt
-tensorflow
-sentence-transformers
-arxiv
-semanticscholar
-scikit-learn
+# Core Data Processing & RAG
 numpy
-rank_bm25
 nltk
-requests
-beautifulsoup4
-trafilatura
-python-dotenv
-huggingface_hub # Added huggingface_hub for Hugging Face models
-PyPDF2
-tenacity
-groq # Added groq if you use Groq API
-fastapi[all]
-uvicorn[standard] # Added uvicorn separately for clarity if needed later
-PyMuPDF
-google-cloud-aiplatform
-google-generativeai
-# Consider pinning versions for better reproducibility
+scikit-learn # For cosine_similarity in recommender
+tenacity # For retries in API calls
+python-dotenv # For loading .env files (API keys etc)
 
-# streamlit # For UI based applications
+# Embeddings & LLMs (Choose based on config.py)
+google-generativeai # For Gemini API (LLM & Embeddings)
+google-cloud-aiplatform # For Vertex AI Embeddings (if configured)
+# sentence-transformers # Needed if using embedding_model_manual.py
+# tensorflow # Needed if using embedding_model_manual.py or TF features
+# torch # Often needed by sentence-transformers
+
+# Data Fetching & Crawling
+arxiv
+requests
+aiohttp # For async web requests in resource_fetcher.py
+beautifulsoup4 # For HTML parsing
+PyMuPDF # For PDF parsing (imported as fitz)
+# PyPDF2 # Alternative/Legacy PDF library, keep if specifically used
+readability-lxml # For HTML content extraction (depends on lxml)
+lxml # Explicit dependency for readability-lxml
+trafilatura # For advanced HTML text extraction
+cachetools # For caching fetched resources
+pybloom-live # For the Bloom filter in the crawler's visited set
+
+
+# Keyword Search
+rank_bm25 # For BM25 indexing
+
+# Utilities & Other Potential Dependencies
+huggingface_hub # Often used with transformers/tokenizers
+tokenizers # Often used with transformers
+transformers # The main Hugging Face library, keep if using related models/features
+semanticscholar # If using its API
+groq # If using Groq LLM API
+prometheus-client # For metrics in resource_fetcher
+
+# Web Framework (Optional - if you have a separate API)
+fastapi[all]
+uvicorn[standard]
+
+# Streamlit UI (Uncomment if running app.py)
+streamlit
+altair # Often used with Streamlit for charts (imported in annotated_transformer example)
+pandas # Often used with Streamlit/altair
+
+
+# Notes:
+# - Consider pinning specific versions (e.g., google-generativeai==0.8.4) for better reproducibility.
+# - Remove sections (like tensorflow, groq, fastapi) if you are certain they are not needed for your final deployment target.

@@ -21,7 +21,7 @@ st.set_page_config(
     layout="wide",  # Keep 'wide' layout for more space
     initial_sidebar_state="auto", # Allow sidebar usage if we add one later
     menu_items={ # Add useful menu items
-        'Get Help': 'https://github.com/felixnathanael/RAG_Project', # Link to your repo or help page
+        'Get Help': 'https://github.com/Fane-Nathan/Study-Assistant', # Link to your repo or help page
         'Report a bug': "https://tally.so/r/n0kkp6", # Link directly to feedback/bug report
         'About': "# About This Project\nThis app helps explore academic research using RAG."
     }
