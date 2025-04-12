@@ -68,31 +68,29 @@ MAX_ARXIV_RESULTS = 100 # How many papers to grab by default. Don't go too crazy
 # and follow links (within limits) to find more.
 TARGET_WEB_URLS = [
     "https://distill.pub/", # High-quality ML articles
-    "https://developers.google.com/machine-learning/", # Google's ML docs
-    "https://lilianweng.github.io/posts/2023-06-23-agent/", # Awesome blog post on LLM agents
-    "https://mistral.ai/news/mixtral-of-experts/", # Info on Mixtral
-    "https://huggingface.co/blog/mixtral", # More Mixtral info
-    "https://jalammar.github.io/illustrated-transformer/", # Classic Transformer explanation
-    "https://nlp.seas.harvard.edu/papers/", # Harvard NLP papers page
-    # Adding recent ICML / NeurIPS proceedings pages - good source of ML papers!
-    "https://icml.cc/virtual/2024/papers.html",
-    "https://icml.cc/virtual/2023/papers.html",
-    "https://icml.cc/virtual/2022/papers.html",
-    "https://icml.cc/virtual/2021/papers.html",
-    "https://icml.cc/virtual/2020/papers.html",
-    "https://icml.cc/virtual/2019/papers.html",
-    "https://nips.cc/virtual/2024/papers.html?layout=detail",
-    "https://nips.cc/virtual/2023/papers.html?layout=detail",
-    "https://nips.cc/virtual/2022/papers.html?layout=detail",
-    "https://nips.cc/virtual/2021/papers.html?layout=detail",
-    "https://nips.cc/virtual/2020/papers.html?layout=detail",
-    "https://nips.cc/virtual/2019/papers.html?layout=detail",
+    # "https://developers.google.com/machine-learning/", # Google's ML docs
+    # "https://nlp.seas.harvard.edu/papers/", # Harvard NLP papers page
+    # # # Adding recent ICML / NeurIPS proceedings pages - good source of ML papers!
+    # "https://icml.cc/virtual/2024/papers.html?layout=detail",
+    # "https://www.jmlr.org/",
+    # "https://icml.cc/virtual/2023/papers.html",
+    # "https://icml.cc/virtual/2022/papers.html",
+    # "https://icml.cc/virtual/2021/papers.html",
+    # "https://icml.cc/virtual/2020/papers.html",
+    # "https://icml.cc/virtual/2019/papers.html",
+    # "https://nips.cc/virtual/2024/papers.html?layout=detail",
+    # "https://nips.cc/virtual/2023/papers.html?layout=detail",
+    # "https://nips.cc/virtual/2022/papers.html?layout=detail",
+    # "https://nips.cc/virtual/2021/papers.html?layout=detail",
+    # "https://nips.cc/virtual/2020/papers.html?layout=detail",
+    # "https://nips.cc/virtual/2019/papers.html?layout=detail",
+    # "https://quotes.toscrape.com/", # Example site for testing
     # Add MORE high-quality, relevant URLs here! Think key blogs, labs, open-source docs.
 ]
 
 # --- Recommender Settings ---
-MAX_PAGES_TO_CRAWL = 50 # (Limit the total number of pages fetched per run)
-CRAWL_DELAY_SECONDS = 1 # Politeness delay between requests
+MAX_PAGES_TO_CRAWL = 200 # (Limit the total number of pages fetched per run)
+CRAWL_DELAY_SECONDS = 0.2 # Politeness delay between requests
 ALLOWED_DOMAINS = [] # Optional: If empty, allows same domain as start URL...
 
 # Settings for how the hybrid search (semantic + keyword) works.
@@ -109,6 +107,8 @@ MAX_CONTEXT_LENGTH_PER_DOC = 2000 # Max characters to take from each chunk. Keep
 LLM_MAX_NEW_TOKENS = 4096 # Max number of tokens the LLM is allowed to generate in its response. Prevents runaways.
 LLM_TEMPERATURE = 0.3 # Controls LLM creativity/randomness. Lower = more focused, higher = more creative (and potentially weird). 0.3 is quite focused.
 LLM_API_TIMEOUT = 500 # How long to wait (in seconds) for the LLM API to respond before giving up. Generous timeout needed for long responses.
+FETCH_TIMEOUT = 30
+HEAD_TIMEOUT = 15
 
 # --- NEW/UPDATED: Vertex AI Specific Settings ---
 # How many texts can we send to the Vertex AI embedding API in one go? Check the model docs! 250 is often safe for text-embedding-gecko.

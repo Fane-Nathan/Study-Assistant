@@ -15,6 +15,7 @@ env/
 
 # Data files (Uncomment if you don't want to track generated data in Git)
 # data_hybrid/
+hold.txt
 
 # IDE settings
 .vscode/

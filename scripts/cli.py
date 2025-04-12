@@ -17,6 +17,7 @@ import numpy as np
 from typing import Optional, Tuple, List, Dict, Any, Union
 import textwrap
 import traceback
+import asyncio 
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__) # Use 'cli' as logger name
@@ -36,7 +37,7 @@ try:
     from hybrid_search_rag.data.resource_fetcher import fetch_arxiv_papers, crawl_and_fetch_web_articles
     from hybrid_search_rag.retrieval.embedding_model_gemini import EmbeddingModel
     from hybrid_search_rag.data.data_manager import DataManager
-    from hybrid_search_rag.retrieval.recommender import Recommender, tokenize_text
+    from hybrid_search_rag.retrieval.recommender import Recommender, NltkManager, RecommendationParams
     from rank_bm25 import BM25Okapi
     from hybrid_search_rag.llm.llm_interface import get_llm_response
 except ImportError as e:
@@ -52,7 +53,8 @@ except ImportError as e:
 def check_nltk_data():
     """Checks required NLTK data ('punkt', 'stopwords'). Exits if missing after download attempt."""
     required_data = {'punkt': 'tokenizers/punkt', 'stopwords': 'corpora/stopwords'}
-    missing_data = [name for name, path in required_data.items() if not nltk.data.find(path, quiet=True)]
+    # missing_data = [name for name, path in required_data.items() if not nltk.data.find(path, quiet=True)]
+    missing_data = []
 
     if missing_data:
         logger.warning(f"Missing NLTK data packages: {', '.join(missing_data)}.")
@@ -201,7 +203,13 @@ Provide *only* the queries and URLs in the specified format."""
     # Fetching Documents
     logger.info(f"Fetching: arXiv query='{arxiv_query}' (max={max_results}), URLs={len(target_urls)}")
     arxiv_metadata_list = fetch_arxiv_papers(arxiv_query, max_results) if (arxiv_query and max_results > 0) else []
-    web_metadata_list = crawl_and_fetch_web_articles(target_urls) if target_urls else []
+    
+    if target_urls:
+        logger.info("Running asynchronous web fetcher...")
+        web_metadata_list = asyncio.run(crawl_and_fetch_web_articles(target_urls))
+        logger.info(f"Web fetcher finished, got {len(web_metadata_list)} results.")
+    else:
+        web_metadata_list = []
 
     original_documents = arxiv_metadata_list + web_metadata_list
     num_docs_fetched = len(original_documents)
@@ -247,7 +255,7 @@ Provide *only* the queries and URLs in the specified format."""
         status_messages.append("Warning: Embedding failed.")
 
     try: # BM25 Indexing
-        tokenized_corpus = [tokenize_text(t) for t in all_chunk_texts if isinstance(t, str) and t.strip()]
+        tokenized_corpus = [NltkManager.tokenize_text(t) for t in all_chunk_texts if isinstance(t, str) and t.strip()]
         tokenized_corpus = [tok for tok in tokenized_corpus if tok] # Remove empty lists
         if tokenized_corpus:
             bm25_index = BM25Okapi(tokenized_corpus)
@@ -313,13 +321,21 @@ def run_recommendation(query: str, num_final_results: int, general_mode: bool, c
         num_candidates = min(num_candidates, len(loaded_metadata))
 
         if num_candidates > 0:
-             hybrid_results = loaded_recommender.recommend(
-                 query=query, resource_metadata=loaded_metadata, resource_embeddings=loaded_embeddings,
-                 bm25_index=loaded_bm25_index, semantic_candidates=config.SEMANTIC_CANDIDATES,
-                 keyword_candidates=config.KEYWORD_CANDIDATES, fusion_k=config.RANK_FUSION_K,
-                 top_n_final=num_candidates
-             )
-             logger.info(f"Retrieved {len(hybrid_results)} candidate chunks.")
+            rec_params = RecommendationParams(
+                semantic_candidates=config.SEMANTIC_CANDIDATES,
+                keyword_candidates=config.KEYWORD_CANDIDATES,
+                fusion_k=config.RANK_FUSION_K,
+                top_n_final=num_candidates # Use num_candidates here
+            )
+            
+            hybrid_results = loaded_recommender.recommend(
+                query=query,
+                resource_metadata=loaded_metadata,
+                resource_embeddings=loaded_embeddings,
+                bm25_index=loaded_bm25_index,
+                params=rec_params # Pass the created object
+            )
+            logger.info(f"Retrieved {len(hybrid_results)} candidate chunks.")
         else: logger.warning("Skipping retrieval (no metadata or zero candidates needed).")
 
         # Prepare Context & Sources for LLM and display
