@@ -137,17 +137,3 @@ if LLM_PROVIDER == "google" and not GOOGLE_API_KEY:
     print("GOOGLE_API_KEY=YourActualGoogleKeyValue")
     print("You can get a key from Google AI Studio (https://ai.google.dev/) or Google Cloud Console.")
     print("="*50 + "\\n")
-
-# Check for Vertex AI Project ID (ALWAYS needed now for embeddings)
-if not VERTEX_AI_PROJECT:
-    logging.warning("Google Cloud Project ID (VERTEX_AI_PROJECT) not found.")
-    print("\\n" + "="*50)
-    print("Warning: Google Cloud Project ID (VERTEX_AI_PROJECT) not found.")
-    print(f"Please create or check the .env file in the project root ({project_root}) and add:")
-    print("VERTEX_AI_PROJECT=your-gcp-project-id")
-    # Crucial reminder: Just having the ID isn't enough, need authentication!
-    print("Ensure you have also authenticated via `gcloud auth application-default login`.")
-    print("="*50 + "\\n")
-    # Maybe even exit if it's absolutely critical? Uncomment below if needed.
-    # import sys
-    # sys.exit("Vertex AI Project ID is missing. Exiting.")
