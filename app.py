@@ -28,58 +28,64 @@ st.set_page_config(
 )
 
 # --- NLTK Data Download Logic ---
-# (Code for checking/downloading NLTK data remains here - unchanged)
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError: pass
-else: ssl._create_default_https_context = _create_unverified_https_context
-NLTK_PACKAGES = ['punkt', 'stopwords']
+
+NLTK_RESOURCES = {
+    'punkt': 'tokenizers/punkt',
+    'punkt_tab': 'tokenizers/punkt_tab', # Add punkt_tab here
+    'stopwords': 'corpora/stopwords'
+}
 download_needed_flag = False
 if 'nltk_data_checked' not in st.session_state: st.session_state.nltk_data_checked = False
+
 if not st.session_state.nltk_data_checked:
     logger.info("Checking NLTK data...")
-    # Use st.progress for visual feedback during NLTK download check
     progress_bar = st.progress(0, text="Checking NLTK data requirements...")
     with st.spinner("Verifying core language libraries..."):
-        all_packages_found = True
-        total_packages = len(NLTK_PACKAGES)
-        for i, package in enumerate(NLTK_PACKAGES):
-             progress_text = f"Checking NLTK package: '{package}' ({i+1}/{total_packages})..."
-             progress_bar.progress((i + 1) / total_packages, text=progress_text)
+        all_resources_found = True
+        total_resources = len(NLTK_RESOURCES)
+        # Iterate through the dictionary
+        for i, (resource_name, resource_path) in enumerate(NLTK_RESOURCES.items()):
+             progress_text = f"Checking NLTK resource: '{resource_name}' ({i+1}/{total_resources})..."
+             progress_bar.progress((i + 1) / total_resources, text=progress_text)
              try:
-                 nltk.data.find(f'tokenizers/{package}' if package == 'punkt' else f'corpora/{package}')
-                 logger.info(f"NLTK package '{package}' found.")
+                 # Use the path from the dictionary for checking
+                 nltk.data.find(resource_path)
+                 logger.info(f"NLTK resource '{resource_name}' found.")
              except LookupError:
-                 logger.warning(f"NLTK package '{package}' not found. Triggering download.")
+                 logger.warning(f"NLTK resource '{resource_name}' not found. Triggering download.")
                  download_needed_flag = True
-                 progress_bar.progress((i + 1) / total_packages, text=f"Downloading NLTK package: '{package}'...")
+                 # Use the resource_name for downloading
+                 progress_bar.progress((i + 1) / total_resources, text=f"Downloading NLTK resource: '{resource_name}'...")
                  try:
-                     nltk.download(package, quiet=True)
-                     logger.info(f"NLTK '{package}' download attempt finished.")
-                     nltk.data.find(f'tokenizers/{package}' if package == 'punkt' else f'corpora/{package}')
-                     logger.info(f"NLTK '{package}' found after download attempt.")
+                     # Download using the resource name (like 'punkt' or 'punkt_tab')
+                     nltk.download(resource_name, quiet=True)
+                     logger.info(f"NLTK '{resource_name}' download attempt finished.")
+                     # Verify again after download
+                     nltk.data.find(resource_path)
+                     logger.info(f"NLTK '{resource_name}' found after download attempt.")
                  except Exception as e:
-                     st.error(f"Fatal Error: Failed to download NLTK package '{package}'. Error: {e}")
-                     logger.error(f"NLTK '{package}' download failed: {e}", exc_info=True)
-                     all_packages_found = False
-                     progress_bar.empty() # Clear progress bar on failure
+                     st.error(f"Fatal Error: Failed to download NLTK resource '{resource_name}'. Error: {e}")
+                     logger.error(f"NLTK '{resource_name}' download failed: {e}", exc_info=True)
+                     all_resources_found = False
+                     progress_bar.empty()
                      st.stop()
              except Exception as E_find:
-                  st.error(f"Fatal Error checking NLTK package '{package}'. Error: {E_find}")
-                  logger.error(f"NLTK '{package}' check failed: {E_find}", exc_info=True)
-                  all_packages_found = False
-                  progress_bar.empty() # Clear progress bar on failure
+                  st.error(f"Fatal Error checking NLTK resource '{resource_name}'. Error: {E_find}")
+                  logger.error(f"NLTK '{resource_name}' check failed: {E_find}", exc_info=True)
+                  all_resources_found = False
+                  progress_bar.empty()
                   st.stop()
-        # (Keep the rest of the NLTK check logic here)
-        progress_bar.empty() # Clear progress bar on success
+
+        progress_bar.empty()
         if download_needed_flag: logger.info("NLTK download process completed.")
-        if all_packages_found:
+        if all_resources_found:
             st.session_state.nltk_data_checked = True
             logger.info("NLTK session state marked as checked.")
         else:
-             logger.error("Not all NLTK packages were found/downloaded successfully.")
-             st.error("Failed to prepare all required NLTK packages.")
+             logger.error("Not all NLTK resources were found/downloaded successfully.")
+             st.error("Failed to prepare all required NLTK resources.")
 # --- End NLTK Data Download ---
+
 
 # --- Path Setup ---
 # (Path setup code remains here - unchanged)
