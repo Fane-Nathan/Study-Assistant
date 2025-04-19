@@ -45,7 +45,8 @@ streamlit
 altair # Often used with Streamlit for charts (imported in annotated_transformer example)
 pandas # Often used with Streamlit/altair
 
-
+thefuzz 
+python-Levenshtein
 # Notes:
 # - Consider pinning specific versions (e.g., google-generativeai==0.8.4) for better reproducibility.
 # - Remove sections (like tensorflow, groq, fastapi) if you are certain they are not needed for your final deployment target.

@@ -7,7 +7,7 @@ import requests # Needed for Hugging Face
 from groq import Groq, RateLimitError, APIError # Groq's specific library
 from tenacity import retry, stop_after_attempt, wait_exponential # For robust API calls with retries
 from .. import config # Use relative import for configuration
-from typing import Union
+from typing import Optional, Union
 
 # Import Google Generative AI library
 try:
@@ -172,29 +172,65 @@ def _call_google_api(prompt: str) -> Union[str, None]:
 # ---
 
 # --- Main LLM Dispatcher Function ---
-def get_llm_response(prompt: str) -> Union[str, None]:
-    """
-    Routes the prompt to the appropriate LLM API based on config.LLM_PROVIDER.
-
-    Args:
-        prompt: The input prompt string.
-
-    Returns:
-        The LLM's response string, or None if an error occurred.
-    """
-    provider = config.LLM_PROVIDER
-    # logger.debug(f"Routing prompt to LLM Provider: {provider}") # Debug level
-
-    if provider == "groq":
-        return _call_groq_api(prompt)
-    elif provider == "huggingface":
-         if hasattr(config, 'HF_MODEL_ID') and hasattr(config, 'HF_API_URL'):
-             return _call_huggingface_api(prompt)
-         else:
-             logger.error("Hugging Face selected, but config missing HF_MODEL_ID or HF_API_URL.")
-             return None
-    elif provider == "google":
-        return _call_google_api(prompt)
-    else:
-        logger.error(f"Unsupported LLM provider configured: {provider}")
+def get_llm_response(prompt: str, model_name: str = config.LLM_MODEL_ID, **kwargs) -> Optional[str]:
+    """Gets a standard, non-streaming response from the Gemini API."""
+    if not config.GOOGLE_API_KEY:
+        logger.error("GOOGLE_API_KEY not configured. Cannot call LLM.")
         return None
+    try:
+        genai.configure(api_key=config.GOOGLE_API_KEY) # Ensure configured
+        model = genai.GenerativeModel(model_name)
+        logger.info(f"Sending request to Google API (Model: {model_name})...")
+        # Standard non-streaming call
+        response = model.generate_content(prompt, **kwargs)
+        logger.info("Google API request successful.")
+        # Accessing response text (adjust based on actual API response structure if needed)
+        # Example assumes response.text or similar direct access
+        return response.text if hasattr(response, 'text') else str(response) # Basic handling
+    except Exception as e:
+        logger.error(f"Error during Gemini API call: {e}", exc_info=True)
+        return None
+
+
+def get_llm_response_stream(prompt: str, model_name: str = config.LLM_MODEL_ID, **kwargs):
+    """
+    Gets a streaming response from the Gemini API.
+    Yields:
+        str: Chunks of text from the LLM response.
+    Raises:
+        Exception: Propagates API call errors after logging.
+    """
+    if not config.GOOGLE_API_KEY:
+        logger.error("GOOGLE_API_KEY not configured. Cannot call LLM stream.")
+        yield "[Error: API Key Not Configured]" # Yield error message
+        return # Stop generation
+
+    try:
+        genai.configure(api_key=config.GOOGLE_API_KEY) # Ensure configured
+        model = genai.GenerativeModel(model_name)
+        logger.info(f"Sending STREAMING request to Google API (Model: {model_name})...")
+
+        # Use stream=True
+        response_stream = model.generate_content(prompt, stream=True, **kwargs)
+
+        # Iterate through the stream and yield the text parts
+        for chunk in response_stream:
+            # Access text part safely - adjust based on actual chunk structure
+            # Use getattr for safer access in case 'text' attribute is missing
+            text_part = getattr(chunk, 'text', None)
+            if text_part:
+                yield text_part
+            # Optional: Check for blocked prompts or other non-text parts if necessary
+            # elif chunk.prompt_feedback.block_reason:
+            #    logger.warning(f"Stream blocked: {chunk.prompt_feedback.block_reason}")
+            #    yield f"[Stream stopped due to: {chunk.prompt_feedback.block_reason}]"
+            #    break # Stop streaming if blocked
+
+        logger.info("Google API stream finished.")
+
+    except Exception as e:
+        logger.error(f"Error during Gemini streaming API call: {e}", exc_info=True)
+        # Yield an error message then stop
+        yield f"[Error generating streaming response: {e}]"
+        # Optionally re-raise if the caller should handle it more directly
+        # raise e

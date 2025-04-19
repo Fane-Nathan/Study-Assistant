@@ -1,5 +1,3 @@
-# --- Create or add to: hybrid_search_rag/utils/highlighting.py ---
-
 import nltk
 from thefuzz import fuzz # Requires: pip install thefuzz python-Levenshtein
 import logging
@@ -55,6 +53,7 @@ def highlight_sources_fuzzy(
     context_sentences_with_indices: List[Tuple[str, int]] = []
     for idx, chunk in enumerate(context_chunks):
         chunk_text = chunk.get('text', '')
+        logger.debug(f"Highlighting loop - Chunk {idx} - Type: {type(chunk_text)}, Text: '{str(chunk_text)[:100]}...'")
         if not chunk_text or not isinstance(chunk_text, str):
              logger.warning(f"Skipping invalid context chunk at index {idx}")
              continue

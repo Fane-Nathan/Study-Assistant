@@ -1,5 +1,7 @@
 # app.py
 import streamlit as st
+import logging
+import math
 import nltk
 import ssl
 import os
@@ -7,12 +9,28 @@ import sys
 import argparse
 import traceback
 import streamlit.components.v1 as components
-import logging
-import math
+from thefuzz import fuzz
+from typing import List, Dict, Any
+from hybrid_search_rag import config
+from scripts.cli import ( load_components, run_recommendation,
+                          setup_data_and_fetch, run_arxiv_search )
 
 # --- Basic Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [App] %(message)s', force=True)
 logger = logging.getLogger(__name__)
+
+try:
+    # Ensure config and the MODIFIED run_recommendation are imported
+    from hybrid_search_rag import config
+    from scripts.cli import run_recommendation # Expects (gen, formatted_src, raw_chunks)
+    # Import the highlighting function
+    from hybrid_search_rag.utils.highlighting import highlight_sources_fuzzy # Adjust path if needed
+    highlighting_available = True
+    project_modules_loaded = True
+except ImportError:
+    logger.warning("Highlighting utility or other project modules not found.")
+    highlighting_available = False
+    project_modules_loaded = False
 
 # --- Page Configuration (Enhanced) ---
 st.set_page_config(
@@ -28,7 +46,6 @@ st.set_page_config(
 )
 
 # --- NLTK Data Download Logic ---
-
 NLTK_RESOURCES = {
     'punkt': 'tokenizers/punkt',
     'punkt_tab': 'tokenizers/punkt_tab', # Add punkt_tab here
@@ -196,10 +213,11 @@ with tab_rec:
     st.header("💬 Ask the RAG Assistant")
     st.markdown("Enter your research topic or question below. The assistant will retrieve relevant information from the indexed documents and generate a cited answer.")
 
-    col1_rec, col2_rec = st.columns([3, 1]) # Keep layout for input/controls
+    col1_rec, col2_rec = st.columns([3, 1]) # Layout for input/controls
 
     with col1_rec:
-        default_query = config.DEFAULT_QUERY if project_modules_loaded else "Example: Explain the core concepts of Retrieval-Augmented Generation (RAG)."
+        # Input Text Area
+        default_query = config.DEFAULT_QUERY if project_modules_loaded else "Example: Explain Retrieval-Augmented Generation (RAG)."
         query = st.text_area(
             "Your Question:",
             value=st.session_state.get("rec_query", default_query),
@@ -207,89 +225,140 @@ with tab_rec:
             key="rec_query_input_area",
             placeholder="Type your question about the research papers here...",
             help="Ask anything related to the content of the indexed documents.",
-            label_visibility="collapsed" # Cleaner look if header is clear
+            label_visibility="collapsed"
         )
 
     with col2_rec:
-        st.markdown("**Options**") # Add a small title for options
-        general_mode = st.toggle( # Use toggle for a more modern feel than checkbox
+        # Options Toggles
+        st.markdown("**Options**")
+        general_mode = st.toggle(
             "Hybrid Mode",
             value=st.session_state.get("rec_general", False),
             key="rec_general_toggle",
             help="Allows the AI to use its general knowledge *in addition* to the retrieved documents. 'Strict Mode' (off) uses *only* document context."
         )
-        concise_mode = st.toggle( # Use toggle here too
+        concise_mode = st.toggle(
             "Concise Prompt",
             value=st.session_state.get("rec_concise", True),
             key="rec_concise_toggle",
             help="Uses a more structured, concise prompt for the AI, potentially faster but less conversational."
         )
-        st.markdown("---") # Visual separator
+        st.markdown("---")
         submit_rec = st.button(
-            "✨ Get Recommendation", # Add sparkle
+            "✨ Get Recommendation",
             type="primary",
             key="rec_button",
-            disabled=not components_loaded or not query, # Disable if no query OR components not loaded
+            disabled=not components_loaded or not query,
             use_container_width=True
         )
 
+    # --- Logic when Button is Clicked (Implements Streaming) ---
     if submit_rec:
-        # Removed redundant 'if not query' check because button is disabled
-        if not components_loaded: st.error("Cannot recommend: Core components failed load.")
+        if not components_loaded:
+            st.error("Cannot recommend: Core components failed load.")
         else:
+            # Store inputs in session state
             st.session_state.rec_query = query
             st.session_state.rec_general = general_mode
             st.session_state.rec_concise = concise_mode
             mode_name = "Hybrid" if general_mode else "Strict"
             style_name = "Concise" if concise_mode else "Detailed"
             st.info(f"Running recommendation with '{mode_name}' RAG and '{style_name}' Prompt...", icon="⏳")
-            # Use st.spinner for better visual feedback during processing
+
+            # Use st.spinner for visual feedback
             with st.spinner("🧠 Thinking... Retrieving context and generating response..."):
                 try:
                     top_n = config.TOP_N_RESULTS if project_modules_loaded else 5
-                    llm_answer, context_sources = run_recommendation(query, top_n, general_mode, concise_mode)
-                    st.session_state.llm_answer = llm_answer
+
+                    response_generator, context_sources, raw_context_chunks = run_recommendation(query, top_n, general_mode, concise_mode)
+
+                    # Store formatted sources and RAW chunks immediately
                     st.session_state.context_sources = context_sources
+                    st.session_state.raw_context_chunks = raw_context_chunks
+
+                    # Consume the generator to get the full response text *without* displaying stream
+                    full_response_list = []
+                    for chunk in response_generator:
+                        full_response_list.append(chunk)
+                    full_response = "".join(full_response_list)
+
+                    # Store the complete response in session state
+                    st.session_state.llm_answer = full_response
                     st.toast("Response generated!", icon="✅")
+
                 except Exception as e:
                     st.error(f"Error during recommendation: {e}", icon="❌")
                     logger.error(f"Recommendation Error: {e}", exc_info=True)
+                    # Clear results on error
                     st.session_state.llm_answer = None
                     st.session_state.context_sources = []
+                    st.session_state.raw_context_chunks = []
 
-    if "llm_answer" in st.session_state and st.session_state.llm_answer:
-        st.markdown("---")
-        st.subheader("Assistant's Response")
-        st.markdown(st.session_state.llm_answer, unsafe_allow_html=True)
+    # --- Displaying the Highlighted Response and Sources ---
+    # This block now displays the answer *once*, after potential highlighting
 
+    # Check if an answer exists in session state
+    if "llm_answer" in st.session_state and st.session_state.llm_answer is not None:
+        st.markdown("---") # Separator before the answer display
+        st.subheader("Assistant's Response") # Display header
+
+        # --- APPLY HIGHLIGHTING HERE ---
+        if highlighting_available:
+            try:
+                logger.debug("Attempting to apply source highlighting...")
+                # Get the raw context chunks stored previously
+                raw_chunks_to_use = st.session_state.get("raw_context_chunks", [])
+                
+                # --- Debug Log ---
+                logger.debug(f"Highlighting received raw_chunks_to_use (type: {type(raw_chunks_to_use)}, len: {len(raw_chunks_to_use)}).")
+                if raw_chunks_to_use:
+                    logger.debug(f"First chunk keys in app.py: {raw_chunks_to_use[0].keys()}")
+                    logger.debug(f"First chunk text snippet in app.py: {str(raw_chunks_to_use[0].get('text', 'N/A'))[:100]}...")
+                
+                if raw_chunks_to_use: # Ensure chunks are available
+                     # Call the highlighting function on the full response
+                     highlighted_answer = highlight_sources_fuzzy(
+                         st.session_state.llm_answer,
+                         raw_chunks_to_use # Pass the list of dicts
+                     )
+                     logger.debug("Highlighting applied successfully.")
+                     # Display highlighted answer using Markdown *once*
+                     st.markdown(highlighted_answer, unsafe_allow_html=False) # False for Markdown bolding
+                else:
+                    logger.warning("Raw context chunks not found in session state for highlighting. Displaying raw answer.")
+                    # Display raw answer *once* if highlighting cannot be done due to missing chunks
+                    st.markdown(st.session_state.llm_answer, unsafe_allow_html=True)
+
+            except Exception as high_e:
+                 logger.error(f"Error applying highlighting: {high_e}", exc_info=True)
+                 # Fallback to displaying raw answer *once* on error
+                 st.markdown(st.session_state.llm_answer, unsafe_allow_html=True)
+        else:
+             # Highlighting function wasn't imported, display raw answer *once*
+             logger.warning("Highlighting function not available. Displaying raw answer.")
+             st.markdown(st.session_state.llm_answer, unsafe_allow_html=True)
+        # --- END APPLY HIGHLIGHTING ---
+
+    # Check if the recommendation process was run (key exists)
     if "context_sources" in st.session_state:
-
-         if st.session_state.context_sources or ("llm_answer" in st.session_state and st.session_state.llm_answer):
-            st.markdown("---")
-
-            with st.expander("📚 Show Context Sources Provided to LLM", expanded=False):
-                 sources = st.session_state.context_sources
-                 if sources:
+        # Add the divider if sources exist or if an answer was generated
+        if st.session_state.context_sources or ("llm_answer" in st.session_state and st.session_state.llm_answer is not None):
+             # Display the sources expander if context_sources is not empty
+             if st.session_state.context_sources:
+                 with st.expander("📚 Show Context Sources Provided to LLM", expanded=False):
+                     sources = st.session_state.context_sources # Should be the list of formatted strings
                      st.caption("These are the document snippets retrieved and used to generate the answer above:")
                      num_sources = len(sources)
-
                      if num_sources > 0:
                          num_columns = 2
                          cols = st.columns(num_columns)
                          midpoint = math.ceil(num_sources / num_columns)
-
                          with cols[0]:
                              for i in range(midpoint):
-                                 if i < num_sources:
-                                     st.markdown(f"{sources[i]}")
-
+                                 if i < num_sources: st.markdown(f"{sources[i]}")
                          with cols[1]:
                              for i in range(midpoint, num_sources):
-                                 st.markdown(f"{sources[i]}")
-
-                 else:
-                     st.info("No specific document chunks were retrieved as relevant context for this query.")
-
+                                 if i < num_sources: st.markdown(f"{sources[i]}")
 
 # --- How It Works Tab (Enhanced with Icons/Formatting) ---
 with tab_how:

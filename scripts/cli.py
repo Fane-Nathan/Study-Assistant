@@ -39,7 +39,7 @@ try:
     from hybrid_search_rag.data.data_manager import DataManager
     from hybrid_search_rag.retrieval.recommender import Recommender, NltkManager, RecommendationParams
     from rank_bm25 import BM25Okapi
-    from hybrid_search_rag.llm.llm_interface import get_llm_response
+    from hybrid_search_rag.llm.llm_interface import get_llm_response, get_llm_response_stream
 except ImportError as e:
     # Use print for critical import errors as logger might not be configured yet
     print(f"ERROR: Failed to import project modules: {e}", file=sys.stderr)
@@ -296,38 +296,40 @@ def format_fallback_results(results: List[Tuple[Dict[str, Any], float]], num_to_
     return "\n".join(lines)
 
 # --- Recommendation Logic ---
-def run_recommendation(query: str, num_final_results: int, general_mode: bool, concise_mode: bool) -> Tuple[Optional[str], List[str]]:
-    """Handles recommendation: retrieves chunks, prepares context, calls LLM."""
+def run_recommendation(query: str, num_final_results: int, general_mode: bool, concise_mode: bool) -> Tuple[Any, List[str], List[Dict[str, Any]]]:
+    """
+    Handles recommendation: retrieves chunks, prepares context, calls LLM stream.
+    Returns a tuple: (response_generator, formatted_source_list, raw_context_chunks_list)
+    """
     mode_name = "Hybrid" if general_mode else "Strict"
     style_name = "Concise" if concise_mode else "Detailed"
     logger.info(f"Running recommendation ({mode_name} RAG, {style_name} Prompt) for query: '{query[:100]}...'")
 
-    llm_answer_final: Optional[str] = None
-    source_info_list: List[str] = []
+    response_generator = None # Initialize generator
+    formatted_source_list: List[str] = []
+    raw_context_chunks_list: List[Dict[str, Any]] = [] # For highlighting
     hybrid_results: List[Tuple[Dict[str, Any], float]] = []
 
     try:
-        # Ensure components are loaded
+        # 1. Load Components
         if loaded_recommender is None or loaded_metadata is None:
-            logger.info("Components not loaded, attempting load...")
-            load_components()
+             logger.info("Components not loaded, attempting load...")
+             load_components()
         if loaded_recommender is None or loaded_metadata is None:
-             raise RuntimeError("Core components failed to load. Run 'fetch' command.")
+             raise RuntimeError("Core components failed to load. Run 'fetch' command first.")
 
-        # Retrieval Step
+        # 2. Retrieval Step
         logger.info("Retrieving relevant document chunks...")
-        # Request slightly more candidates than needed for context/fallback
         num_candidates = max(config.RAG_NUM_DOCS + 5, num_final_results + 5)
         num_candidates = min(num_candidates, len(loaded_metadata))
-
         if num_candidates > 0:
             rec_params = RecommendationParams(
                 semantic_candidates=config.SEMANTIC_CANDIDATES,
                 keyword_candidates=config.KEYWORD_CANDIDATES,
                 fusion_k=config.RANK_FUSION_K,
-                top_n_final=num_candidates # Use num_candidates here
+                top_n_final=num_candidates # Use the calculated num_candidates
             )
-            
+
             hybrid_results = loaded_recommender.recommend(
                 query=query,
                 resource_metadata=loaded_metadata,
@@ -336,31 +338,32 @@ def run_recommendation(query: str, num_final_results: int, general_mode: bool, c
                 params=rec_params # Pass the created object
             )
             logger.info(f"Retrieved {len(hybrid_results)} candidate chunks.")
-        else: logger.warning("Skipping retrieval (no metadata or zero candidates needed).")
+        else: logger.warning("Skipping retrieval (no metadata available or zero candidates needed).")
 
-        # Prepare Context & Sources for LLM and display
+        # 3. Prepare Context, Formatted Sources, AND Raw Chunks
         context_string = "No relevant document chunks were found in the local data."
+        reference_map = {}
         if hybrid_results:
             top_chunks_for_rag = hybrid_results[:config.RAG_NUM_DOCS]
+            # Store raw chunk dictionaries for highlighting later
+            raw_context_chunks_list = [chunk_meta for chunk_meta, _ in top_chunks_for_rag]
             context_texts = []
-            reference_map = {}
-            for i, (chunk_meta, _) in enumerate(top_chunks_for_rag):
-                chunk_num = i + 1
-                title = chunk_meta.get('original_title', 'N/A')
-                url = chunk_meta.get('original_url', '#')
-                snippet = (chunk_meta.get('chunk_text', '') or '')[:config.MAX_CONTEXT_LENGTH_PER_DOC]
-                # Format context for LLM prompt
-                context_texts.append(f"[{chunk_num}] Title: {title}\nURL: {url}\nSnippet: {snippet}")
-                # Format source for display list (no leading spaces needed here)
-                reference_map[chunk_num] = f"{title} (URL: {url})"
-
+            for i, chunk_meta in enumerate(raw_context_chunks_list):
+                 chunk_num = i + 1
+                 title = chunk_meta.get('original_title', 'N/A')
+                 url = chunk_meta.get('original_url', '#')
+                 snippet = (chunk_meta.get('chunk_text', '') or '')[:config.MAX_CONTEXT_LENGTH_PER_DOC]
+                 context_texts.append(f"[{chunk_num}] Title: {title}\nURL: {url}\nSnippet: {snippet}")
+                 reference_map[chunk_num] = f"{title} (URL: {url})"
             context_string = "\n\n---\n\n".join(context_texts)
-            # Format for the list to be returned for display (e.g., in Streamlit)
-            source_info_list = [f"[{num}] {details}" for num, details in reference_map.items()]
-            logger.info(f"Prepared context from {len(top_chunks_for_rag)} chunks.")
-        else: logger.info("No relevant document chunks found to provide as context.")
+            # Create the formatted list for display
+            formatted_source_list = [f"[{num}] {details}" for num, details in reference_map.items()]
+            logger.info(f"Prepared context from {len(raw_context_chunks_list)} chunks.")
+        else:
+            logger.info("No relevant document chunks found to provide as context.")
+            formatted_source_list = ["No relevant document chunks found."]
 
-        # Prompt Selection and LLM Call
+        # 4. Prompt Selection (Choose system message based on modes)
         final_prompt: str = ""
         prompt_template_base = """[INST] {system_message}
 
@@ -369,83 +372,124 @@ Provided Document Chunks:
 
 User Question: {query} [/INST]
 Answer:"""
-
         # Decide which system message to use based on modes
         # (Using the previously corrected prompts with simplified citation instruction)
         if general_mode:
             if concise_mode:
-                system_message = ( # Hybrid + Concise
-                    "You are a helpful AI assistant.\n"
-                    "Give a structured summary answering the user's question.\n"
-                    "Use the document chunks I provide for details when needed, but also use your general knowledge.\n"
-                    "Format your response *exactly* like this, using Markdown headers:\n\n"
-                    "## What is it about:\n[...]\n\n"
-                    "## Key Findings:\n[...]\n\n"
-                    "## Conclusion:\n[...]\n\n"
-                    "Cite relevant chunk numbers like [1], [2].\n"
-                    "At the very end, create a section `## Citations:`.\n"
-                    "Under that heading, provide a numbered list mapping citations [N] used to the source document.\n"
-                    "Format each item by copying the Title and URL associated with that number from the 'Provided Document Chunks' section above (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
-                    "After Citations, add `## Further Reading Suggestions:`.\n"
-                    "Suggest 1-4 relevant resources as a numbered list: `1. Resource Title: <URL or Description>`"
+                system_message = ( # Hybrid + Concise (Revised without \n)
+                    "You are a helpful AI research assistant."
+                    "Provide a structured summary answering the user's question."
+                    "Use the provided document chunks for key details, supplementing with your general knowledge where appropriate."
+                    "**Format your entire response using standard Markdown.**"
+                    
+                    "Use the following structure:"
+                    
+                    "## Summary"
+                    "[Provide a brief overview answering the main question.]"
+                    
+                    "## Key Details"
+                    "[List the most important findings or points using bullet points (* or -). Cite sources like [1], [2].]"
+                    
+                    "## Conclusion"
+                    "[Summarize the main takeaways.]"
+                    
+                    "## Citations"
+                    "[Provide a numbered list mapping citation numbers [N] to the source document Title and URL from the 'Provided Document Chunks' section above. Format: '1. Title: [Actual Title] URL: [Actual URL]']"
+                    
+                    "## Further Reading Suggestions"
+                    "[Suggest 1-3 relevant resources as a numbered list: '1. Resource Title: <URL or Description>']"
                 )
             else:
-                system_message = ( # Hybrid + Detailed
-                     "You are an AI assistant expert at analyzing technical documents.\n"
-                     "Give a **very detailed and complete** answer to the user's question.\n"
-                     "Base your answer mainly on the 'Provided Document Chunks', but add relevant general knowledge for clarity.\n"
-                     "Structure your answer clearly:\n1. Overview paragraph.\n2. Detailed Sections (use `## Heading` for topics, explain in detail using 3-5 sentences per point, combine info across chunks).\n3. Conclusion paragraph (summarize, mention limits).\n\n"
-                     "Cite chunk numbers like [1], [2].\n"
-                     "At the end, create `## Citations:`.\n"
-                     "Under it, list citations [N] by copying Title/URL from context (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
-                     "After Citations, add `## Further Reading Suggestions:`.\n"
-                     "Suggest 1-4 resources as a numbered list: `1. Resource Title: <URL or Description>`"
+                system_message = ( # Hybrid + Detailed (Revised without \n)
+                     "You are an AI assistant expert at analyzing technical documents."
+                     "Provide a **detailed and comprehensive** answer to the user's question."
+                     "Base your answer primarily on the 'Provided Document Chunks', but integrate relevant general knowledge smoothly for context and clarity."
+                     "**Structure your response clearly using standard Markdown:**"
+                     
+                     "**## Overview:**"
+                     "[Start with a concise paragraph summarizing the main answer.]"
+                     
+                     "**## Detailed Analysis:**"
+                     "[Use ### Sub-Headings for distinct topics found in the documents. Under each sub-heading, explain the topic thoroughly using multiple sentences or bullet points (* or -). Synthesize information across different chunks where applicable. Cite sources frequently like [1], [2].]"
+                     
+                     "**## Conclusion:**"
+                     "[Provide a concluding paragraph summarizing the key points and any limitations based on the provided context.]"
+                     
+                     "**## Further Reading Suggestions**"
+                     "[Suggest 2-4 relevant resources as a numbered list: '1. Resource Title: <URL or Description>']"
+                     
+                     "**## Citations**"
+                     "[Provide a numbered list mapping citation numbers [N] used to the source document Title and URL from the 'Provided Document Chunks' section above. Format: '1. Title: [Actual Title] URL: [Actual URL]']"
                 )
         else: # Strict Mode
             if concise_mode:
-                system_message = ( # Strict + Concise
-                     "You are an AI assistant expert at analyzing technical documents.\n"
-                     "Give a short summary answering the user's question using *only* the 'Provided Document Chunks'.\n"
-                     "Format *exactly* like this:\n\n"
-                     "## What is it about:\n[...]\n\n"
-                     "## Key Findings:\n[...]\n\n"
-                     "## Conclusion:\n[...]\n\n"
-                     "Cite chunk numbers like [1], [2].\n"
-                     "At the end, create `## Citations:`.\n"
-                     "Under it, list citations [N] by copying Title/URL from context (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
-                     "If chunks are insufficient, state limitations. Do not use prior knowledge."
+                system_message = ( # Strict + Concise (Revised without \n)
+                     "You are an AI assistant expert at analyzing technical documents."
+                     "Provide a concise summary answering the user's question using **only** information found in the 'Provided Document Chunks'. **Do not use any outside knowledge.**"
+                     "**Format your entire response using standard Markdown.**"
+                     
+                     "Use the following structure:"
+                     
+                     "## Summary"
+                     "[Provide a brief overview answering the main question based *only* on the chunks.]"
+                     
+                     "## Key Findings"
+                     "[List the most important findings or points using bullet points (* or -), citing sources like [1], [2]. Extract information directly from the chunks.]"
+                     
+                     "## Conclusion"
+                     "[Summarize the main takeaways based *only* on the chunks. State if the provided chunks are insufficient to fully answer.]"
+                     
+                     "## Citations"
+                     "[Provide a numbered list mapping citation numbers [N] used to the source document Title and URL from the 'Provided Document Chunks' section above. Format: '1. Title: [Actual Title] URL: [Actual URL]']"
                 )
             else:
-                system_message = ( # Strict + Detailed
-                     "You are an AI assistant expert at analyzing technical documents.\n"
-                     "Give a detailed answer using *only* the 'Provided Document Chunks'.\n"
-                     "Structure:\n1. Overview.\n2. Detailed Sections (`## Heading`, 3-5 sentences/point, combine chunks).\n3. Conclusion.\n\n"
-                     "Cite chunk numbers like [1], [2].\n"
-                     "At the end, create `## Citations:`.\n"
-                     "Under it, list citations [N] by copying Title/URL from context (e.g., '[N] Title: Actual Title URL: Actual URL').\n"
-                     "If chunks are insufficient, state limitations. **Do not use any outside knowledge.**"
+                system_message = ( # Strict + Detailed (Revised without \n)
+                     "You are an AI assistant expert at analyzing technical documents."
+                     "Provide a detailed answer using **only** information found in the 'Provided Document Chunks'. **Do not use any outside knowledge.**"
+                     "**Structure your response clearly using standard Markdown:**"
+                     
+                     "**## Overview:**"
+                     "[Start with a concise paragraph summarizing the main answer based *only* on the chunks.]"
+                     
+                     "**## Detailed Analysis:**"
+                     "[Use ### Sub-Headings for distinct topics found *only* in the documents. Under each sub-heading, explain the topic thoroughly using multiple sentences or bullet points (* or -). Synthesize information across different chunks where applicable, but stick strictly to the provided text. Cite sources frequently like [1], [2].]"
+                     
+                     "**## Conclusion:**"
+                     "[Provide a concluding paragraph summarizing the key points based *only* on the chunks. Explicitly state if the information in the chunks is limited or insufficient.]"
+                     
+                     "**## Further Reading Suggestions**"
+                     "[Suggest 2-4 relevant resources as a numbered list: '1. Resource Title: <URL or Description>']"
+                     
+                     "**## Citations**"
+                     "[Provide a numbered list mapping citation numbers [N] used to the source document Title and URL from the 'Provided Document Chunks' section above. Format: '1. Title: [Actual Title] URL: [Actual URL]']"
                 )
+
 
         final_prompt = prompt_template_base.format(system_message=system_message, context=context_string, query=query)
 
-        logger.info(f"Sending request to LLM ({config.LLM_PROVIDER}, {config.LLM_MODEL_ID})...")
-        llm_answer_raw = get_llm_response(final_prompt)
-
-        if llm_answer_raw:
-            llm_answer_final = llm_answer_raw.strip()
-            logger.info("LLM response received.")
-        else:
-            logger.warning("LLM generation failed or returned empty response.")
-            llm_answer_final = format_fallback_results(hybrid_results, num_final_results)
+        logger.info(f"Sending STREAMING request to LLM ({config.LLM_PROVIDER}, {config.LLM_MODEL_ID})...")
+        response_generator = get_llm_response_stream(final_prompt)
 
     except RuntimeError as e:
-        logger.error(f"Recommendation failed due to component loading error: {e}", exc_info=False) # No need for full traceback here
-        llm_answer_final = f"Error: {e}. Cannot run recommendation."
+        logger.error(f"Recommendation failed due to component loading error: {e}", exc_info=False)
+        def error_generator(): yield f"Error: {e}. Cannot run recommendation."
+        response_generator = error_generator()
+        formatted_source_list = []
+        raw_context_chunks_list = []
     except Exception as e:
-        logger.error(f"Unexpected error during recommendation: {e}", exc_info=True)
-        llm_answer_final = f"An error occurred: {e}"
+        logger.error(f"Unexpected error during recommendation setup: {e}", exc_info=True)
+        def error_generator(): yield f"An unexpected error occurred during setup: {e}"
+        response_generator = error_generator()
+    
+    logger.debug(f"Returning raw_context_chunks_list (type: {type(raw_context_chunks_list)}).")
+    if raw_context_chunks_list: # Check if list is not empty
+        logger.debug(f"First raw chunk keys: {raw_context_chunks_list[0].keys()}")
+        logger.debug(f"First raw chunk text snippet: {str(raw_context_chunks_list[0].get('text', 'N/A'))[:100]}...") # Log snippet safely
+    else:
+        logger.debug("raw_context_chunks_list is empty.")
+    
+    return response_generator, formatted_source_list, raw_context_chunks_list #
 
-    return llm_answer_final, source_info_list
 
 # --- arXiv Search Logic ---
 def run_arxiv_search(query: str, num_results: int) -> List[Dict[str, Any]]:
@@ -516,17 +560,27 @@ def main():
      # Execute Selected Command
     try:
         if args.command == 'recommend':
-            answer, sources = run_recommendation(args.query, args.num_results, args.general, args.concise)
+            response_gen, sources, raw_chunks = run_recommendation(
+                args.query, args.num_results, args.general, args.concise
+            )
             # Format and print CLI output
             mode_name = "Hybrid" if args.general else "Strict"
             print(f"\n--- Running in {mode_name} RAG Mode ---")
             print(f"Query: '{args.query}'")
             print("\n--- Assistant Response ---")
-            if answer:
-                try: terminal_width = os.get_terminal_size().columns
-                except OSError: terminal_width = 80
-                print(textwrap.fill(answer, width=terminal_width, initial_indent="  ", subsequent_indent="  "))
-            else: print("  No response generated.")
+            
+            full_response_cli = ""
+            try:
+                print("  ", end="", flush=True) # Initial indent
+                for chunk in response_gen:
+                    # Replace newlines within the chunk to maintain indent on print
+                    print(chunk.replace('\n', '\n  '), end="", flush=True)
+                    full_response_cli += chunk
+                print() # Final newline after streaming finishes
+            except Exception as stream_e:
+                print(f"\n[Error during streaming output: {stream_e}]")
+                
+                
             print("\n--- Context Sources Provided to LLM ---")
             print("\n".join(sources) if sources else "  None")
             print("-" * 40)
