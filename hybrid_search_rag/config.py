@@ -40,14 +40,14 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # Embedding model (Semantic Search) - Specifies WHICH model to use for turning text into vectors.
 # Previously used a Hugging Face model, now switched to Google's Vertex AI model.
 # EMBEDDING_MODEL_NAME = 'BAAI/bge-large-en-v1.5' # Old one
-EMBEDDING_MODEL_NAME = "models/embedding-001" # Vertex AI Model ID. Check Google's docs for the latest
+EMBEDDING_MODEL_NAME = "models/text-embedding-004" # Vertex AI Model ID. Check Google's docs for the latest
 
 # --- LLM Configuration ---
 # Which LLM provider and model are we using to generate the final answers?
 LLM_PROVIDER = "google"                   # Set provider to Google (Gemini)
 # LLM_MODEL_ID = "llama3-70b-8192"        # Example if using Groq
 # LLM_MODEL_ID = "gemma2-9b-it"           # Another Groq example
-LLM_MODEL_ID = "gemini-2.0-flash"         # Current choice: A fast Gemini model. Make sure it's a valid ID!
+LLM_MODEL_ID = "gemini-2.5-flash-preview-04-17"         # Current choice: A fast Gemini model. Make sure it's a valid ID!
 
 # --- Data Settings ---
 # Where should we store our downloaded data, generated embeddings, etc.?
@@ -69,7 +69,7 @@ MAX_ARXIV_RESULTS = 100 # How many papers to grab by default. Don't go too crazy
 TARGET_WEB_URLS = [
     "https://distill.pub/", # High-quality ML articles
     # "https://developers.google.com/machine-learning/", # Google's ML docs
-    # "https://nlp.seas.harvard.edu/papers/", # Harvard NLP papers page
+    "https://nlp.seas.harvard.edu/papers/", # Harvard NLP papers page
     # # # Adding recent ICML / NeurIPS proceedings pages - good source of ML papers!
     # "https://icml.cc/virtual/2024/papers.html?layout=detail",
     # "https://www.jmlr.org/",

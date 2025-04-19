@@ -368,7 +368,7 @@ with tab_about:
     with col2_about:
         st.subheader("🚀 Future Work & Ideas")
         st.markdown("""
-        * **Corpus Expansion:** Curate and index a larger, more diverse set of relevant papers.
+        * **Corpus Expansion:** Curate and index a larger, more diverse set of relevant papers. 
         * **Evaluation & Tuning:** Systematically evaluate retrieval and generation quality.
         * **Recommender System:** Proactively suggest relevant papers or topics based on user queries or profiles
         * **Personalization:** Allow user profiles, history tracking, and preference settings.

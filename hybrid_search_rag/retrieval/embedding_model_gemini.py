@@ -23,8 +23,8 @@ except (AttributeError, ValueError) as e:
     raise RuntimeError(f"Configuration Error: {e}. Cannot initialize Gemini EmbeddingModel.") from e
 
 # Use default model ID or override from config
-DEFAULT_GEMINI_EMBEDDING_MODEL = "models/embedding-001"
-GEMINI_EMBEDDING_MODEL_ID = getattr(config, 'GEMINI_EMBEDDING_MODEL', DEFAULT_GEMINI_EMBEDDING_MODEL)
+GEMINI_EMBEDDING_MODEL = "models/text-embedding-004"
+GEMINI_EMBEDDING_MODEL_ID = getattr(config, 'GEMINI_EMBEDDING_MODEL', GEMINI_EMBEDDING_MODEL)
 
 # Batching and Delay settings from config or defaults
 GEMINI_API_BATCH_LIMIT = getattr(config, 'GEMINI_API_BATCH_LIMIT', 100) # Default batch limit
