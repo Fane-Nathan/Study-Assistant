@@ -39,8 +39,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # --- Model Settings ---
 # Embedding model (Semantic Search) - Specifies WHICH model to use for turning text into vectors.
 # Previously used a Hugging Face model, now switched to Google's Vertex AI model.
-# EMBEDDING_MODEL_NAME = 'BAAI/bge-large-en-v1.5' # Old one
-EMBEDDING_MODEL_NAME = "models/text-embedding-004" # Vertex AI Model ID. Check Google's docs for the latest
+EMBEDDING_MODEL_NAME = 'models/text-embedding-004'
+# EMBEDDING_MODEL_NAME = "models/gemini-embedding-exp-03-07"
 
 # --- LLM Configuration ---
 # Which LLM provider and model are we using to generate the final answers?
