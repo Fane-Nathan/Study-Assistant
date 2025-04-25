@@ -1,236 +1,303 @@
-# hybrid_search_rag/llm/llm_interface.py
-"""Interface for interacting with different Large Language Model APIs.
-Routes requests to the configured LLM provider (Groq, HF, Google)."""
+# -*- coding: utf-8 -*-
+"""
+Interface for interacting with different Large Language Model APIs.
+Handles requests sequentially through configured providers and their models
+(e.g., Google Model 1 -> Google Model 2 -> Groq Model 1 -> Groq Model 2).
+Includes fallback logic for rate limiting or other specified errors.
+"""
 
 import logging
-import requests # Needed for Hugging Face
-from groq import Groq, RateLimitError, APIError # Groq's specific library
-from tenacity import retry, stop_after_attempt, wait_exponential # For robust API calls with retries
+import time # Import time for potential delays between fallbacks
 from .. import config # Use relative import for configuration
-from typing import Optional, Union
+from typing import Optional, Union, Generator, List, Dict, Any, Tuple # Added Tuple
 
-# Import Google Generative AI library
+# --- Provider Specific Imports and Exception Handling ---
+# Google Gemini
 try:
     import google.generativeai as genai
+    from google.api_core.exceptions import ResourceExhausted as GoogleResourceExhausted
+    from google.api_core.exceptions import GoogleAPICallError, InvalidArgument
+    GOOGLE_AVAILABLE = True
 except ImportError:
-    raise ImportError("Required package 'google-generativeai' not found. Please install it: pip install google-generativeai")
+    logging.getLogger(__name__).warning("Google Generative AI SDK not found (`pip install google-generativeai`). Google provider disabled.")
+    GOOGLE_AVAILABLE = False
+    # Define dummy exceptions if library not found to prevent NameErrors later
+    class GoogleResourceExhausted(Exception): pass
+    class GoogleAPICallError(Exception): pass
+    class InvalidArgument(Exception): pass
+
+# Groq
+try:
+    from groq import Groq, RateLimitError as GroqRateLimitError, APIError as GroqAPIError
+    GROQ_AVAILABLE = True
+except ImportError:
+    logging.getLogger(__name__).warning("Groq SDK not found (`pip install groq`). Groq provider disabled.")
+    GROQ_AVAILABLE = False
+    # Define dummy exceptions
+    class GroqRateLimitError(Exception): pass
+    class GroqAPIError(Exception): pass
 
 logger = logging.getLogger(__name__)
 
-# --- Groq API Call Function ---
-# Uses tenacity's @retry decorator for automatic retries on failure.
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def _call_groq_api(prompt: str) -> Union[str, None]:
-    """Calls the Groq API using configured settings."""
-    logger.info(f"Sending request to Groq API (Model: {config.LLM_MODEL_ID})...")
+# --- Helper Function to Get All Attempt Configurations ---
+def _get_llm_attempts() -> List[Dict[str, Any]]:
+    """
+    Generates a flattened list of LLM attempts based on provider order and models per provider.
 
-    if not config.GROQ_API_KEY:
-        logger.error("Groq API Key not configured. Cannot call Groq API.")
-        return None
-
-    try:
-        client = Groq(api_key=config.GROQ_API_KEY, timeout=config.LLM_API_TIMEOUT)
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=config.LLM_MODEL_ID,
-            max_tokens=config.LLM_MAX_NEW_TOKENS,
-            temperature=config.LLM_TEMPERATURE,
-            stream=False, # Get full response at once
-        )
-        response_text = chat_completion.choices[0].message.content
-        logger.info("Groq API request successful.")
-        return response_text.strip()
-
-    except RateLimitError as e:
-        logger.error(f"Groq API Rate Limit Error: {e}. Check usage limits on console.groq.com.")
-        raise e # Re-raise to allow tenacity retry
-    except APIError as e:
-        logger.error(f"Groq API Error (Status {e.status_code}): {e.message}")
-        return None # Don't retry other API errors
-    except Exception as e:
-        logger.error(f"Unexpected error during Groq API call: {e}", exc_info=True)
-        return None
-
-# --- Hugging Face API Call Function ---
-# Also uses retry for robustness.
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def _call_huggingface_api(prompt: str) -> Union[str, None]:
-    """Calls the Hugging Face Inference API."""
-    # Check for required HF-specific configuration
-    if not hasattr(config, 'HF_MODEL_ID') or not hasattr(config, 'HF_API_URL'):
-         logger.error("HF provider selected, but HF_MODEL_ID or HF_API_URL missing in config.py.")
-         return None
-    logger.info(f"Sending request to Hugging Face Inference API ({config.HF_MODEL_ID})...")
-
-    if not config.HF_API_TOKEN or not config.HF_API_URL:
-        logger.error("Hugging Face API Token or URL not configured.")
-        return None
-
-    headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": config.LLM_MAX_NEW_TOKENS,
-            # Set temperature to None if <= 0, as some HF models require > 0
-            "temperature": config.LLM_TEMPERATURE if config.LLM_TEMPERATURE > 0 else None,
-            "return_full_text": False, # Only get the generated part
-        },
-        "options": {"wait_for_model": True} # Wait if model is loading
+    Returns:
+        A list of dictionaries, each representing one attempt:
+        {'provider': str, 'model_id': str, 'api_key': str | None}
+    """
+    attempts = []
+    provider_details = {
+        "google": {"sdk": GOOGLE_AVAILABLE, "models": config.LLM_GOOGLE_MODELS, "key": config.GOOGLE_API_KEY},
+        "groq": {"sdk": GROQ_AVAILABLE, "models": config.LLM_GROQ_MODELS, "key": config.GROQ_API_KEY},
+        # Add other providers here if needed
     }
-    # Remove temperature parameter if it was set to None
-    if payload["parameters"]["temperature"] is None:
-        del payload["parameters"]["temperature"]
 
+    for provider_name in config.LLM_PROVIDER_ORDER:
+        details = provider_details.get(provider_name)
+        if not details:
+            logger.warning(f"Provider '{provider_name}' in LLM_PROVIDER_ORDER is not recognized or supported.")
+            continue
+
+        if not details["sdk"]:
+            logger.warning(f"SDK for provider '{provider_name}' not available. Skipping.")
+            continue
+
+        if not details["key"]:
+            logger.warning(f"API key for provider '{provider_name}' not found. Skipping.")
+            continue
+
+        if not details["models"]:
+            logger.warning(f"Model list for provider '{provider_name}' is empty. Skipping.")
+            continue
+
+        # Add attempts for each model within this provider
+        for model_id in details["models"]:
+            if model_id: # Ensure model_id is not empty
+                attempts.append({
+                    "provider": provider_name,
+                    "model_id": model_id,
+                    "api_key": details["key"]
+                })
+
+    if not attempts:
+         logger.error("No valid LLM attempts could be configured (check provider order, model lists, keys, and SDKs).")
+
+    return attempts
+
+
+# --- Provider Specific API Call Functions (Streaming - Unchanged) ---
+# _call_google_api_stream and _call_groq_api_stream remain the same as before
+# They accept api_key, model_id, prompt, gen_args
+
+def _call_google_api_stream(api_key: str, model_id: str, prompt: str, gen_args: Dict[str, Any]) -> Generator[str, None, None]:
+    """Calls Google Gemini API and yields streaming response chunks."""
+    # (Implementation from previous version - no changes needed here)
     try:
-        response = requests.post(
-            config.HF_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=config.LLM_API_TIMEOUT
-        )
-        response.raise_for_status() # Check for HTTP 4xx/5xx errors
-        result = response.json()
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_id)
+        logger.info(f"Sending STREAMING request to Google API (Model: {model_id})...")
+        # Adjust generation_config based on passed gen_args
+        final_gen_args = gen_args.copy() # Avoid modifying original dict
+        if 'generation_config' not in final_gen_args: # Ensure generation_config exists
+             final_gen_args['generation_config'] = genai.types.GenerationConfig()
+        # Apply max_output_tokens and temperature from gen_args if present
+        if 'max_output_tokens' in final_gen_args:
+             final_gen_args['generation_config'].max_output_tokens = final_gen_args.pop('max_output_tokens')
+        if 'temperature' in final_gen_args:
+             final_gen_args['generation_config'].temperature = final_gen_args.pop('temperature')
 
-        # Extract generated text (handle potential variations in HF response format)
-        generated_text = None
-        if isinstance(result, list) and result:
-            generated_text = result[0].get("generated_text")
-        elif isinstance(result, dict):
-             generated_text = result.get("generated_text")
+        response_stream = model.generate_content(prompt, stream=True, **final_gen_args)
 
-        if generated_text:
-            logger.info("HF API request successful.")
-            return generated_text.strip()
-        else:
-            logger.error(f"HF API Error: Could not find 'generated_text' in response: {result}")
-            return None
-
-    except requests.exceptions.HTTPError as e:
-        error_details = e.response.text
-        logger.error(f"HF API request failed: Status {e.response.status_code}. Details: {error_details}")
-        if e.response.status_code == 429: raise e # Re-raise for rate limit retries
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"HF API request failed (network/timeout): {e}", exc_info=True)
-        raise e # Re-raise for retries on potentially transient errors
-    except Exception as e:
-        logger.error(f"Unexpected error during HF API call: {e}", exc_info=True)
-        return None
-
-# --- Google Generative AI (Gemini) API Call Function ---
-# Also uses retry.
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def _call_google_api(prompt: str) -> Union[str, None]:
-    """Calls the Google Generative AI API (Gemini models)."""
-    logger.info(f"Sending request to Google API (Model: {config.LLM_MODEL_ID})...")
-
-    if not config.GOOGLE_API_KEY:
-        logger.error("Google API Key not configured. Cannot call Google API.")
-        return None
-
-    try:
-        # Ensure genai library is configured with the key
-        genai.configure(api_key=config.GOOGLE_API_KEY)
-
-        # Create the specific model instance
-        model = genai.GenerativeModel(config.LLM_MODEL_ID)
-
-        # Configure generation parameters
-        generation_config = genai.types.GenerationConfig(
-            max_output_tokens=config.LLM_MAX_NEW_TOKENS,
-            temperature=config.LLM_TEMPERATURE
-        )
-
-        # Optional: Configure safety settings
-        # safety_settings = { ... } # Refer to Google AI documentation
-
-        # Make the API call
-        response = model.generate_content(
-            prompt,
-            generation_config=generation_config#,
-            # safety_settings=safety_settings
-        )
-
-        # Process response, checking for blocked content
-        try:
-            # Accessing response.text is the standard way, but can raise ValueError if blocked
-            response_text = response.text
-            logger.info("Google API request successful.")
-            return response_text.strip()
-        except ValueError:
-            # Handle cases where response text is inaccessible (likely safety block)
-            logger.warning("Google API response contained no text parts (likely blocked by safety filters).")
-            if response.prompt_feedback:
-                 logger.warning(f"Prompt Feedback: {response.prompt_feedback}")
-            return None # Indicate failure or blocked content
-
-    except Exception as e:
-        # Catch other Google API errors (auth, quota, server issues, etc.)
-        logger.error(f"Unexpected error during Google API call: {e}", exc_info=True)
-        # Re-raise to allow tenacity retry
-        raise e
-# ---
-
-# --- Main LLM Dispatcher Function ---
-def get_llm_response(prompt: str, model_name: str = config.LLM_MODEL_ID, **kwargs) -> Optional[str]:
-    """Gets a standard, non-streaming response from the Gemini API."""
-    if not config.GOOGLE_API_KEY:
-        logger.error("GOOGLE_API_KEY not configured. Cannot call LLM.")
-        return None
-    try:
-        genai.configure(api_key=config.GOOGLE_API_KEY) # Ensure configured
-        model = genai.GenerativeModel(model_name)
-        logger.info(f"Sending request to Google API (Model: {model_name})...")
-        # Standard non-streaming call
-        response = model.generate_content(prompt, **kwargs)
-        logger.info("Google API request successful.")
-        # Accessing response text (adjust based on actual API response structure if needed)
-        # Example assumes response.text or similar direct access
-        return response.text if hasattr(response, 'text') else str(response) # Basic handling
-    except Exception as e:
-        logger.error(f"Error during Gemini API call: {e}", exc_info=True)
-        return None
-
-
-def get_llm_response_stream(prompt: str, model_name: str = config.LLM_MODEL_ID, **kwargs):
-    """
-    Gets a streaming response from the Gemini API.
-    Yields:
-        str: Chunks of text from the LLM response.
-    Raises:
-        Exception: Propagates API call errors after logging.
-    """
-    if not config.GOOGLE_API_KEY:
-        logger.error("GOOGLE_API_KEY not configured. Cannot call LLM stream.")
-        yield "[Error: API Key Not Configured]" # Yield error message
-        return # Stop generation
-
-    try:
-        genai.configure(api_key=config.GOOGLE_API_KEY) # Ensure configured
-        model = genai.GenerativeModel(model_name)
-        logger.info(f"Sending STREAMING request to Google API (Model: {model_name})...")
-
-        # Use stream=True
-        response_stream = model.generate_content(prompt, stream=True, **kwargs)
-
-        # Iterate through the stream and yield the text parts
         for chunk in response_stream:
-            # Access text part safely - adjust based on actual chunk structure
-            # Use getattr for safer access in case 'text' attribute is missing
+            if chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
+                 block_reason = chunk.prompt_feedback.block_reason
+                 logger.warning(f"Google stream blocked: {block_reason}")
+                 raise ValueError(f"Stream blocked by safety filters: {block_reason}") # Raise error
             text_part = getattr(chunk, 'text', None)
             if text_part:
                 yield text_part
-            # Optional: Check for blocked prompts or other non-text parts if necessary
-            # elif chunk.prompt_feedback.block_reason:
-            #    logger.warning(f"Stream blocked: {chunk.prompt_feedback.block_reason}")
-            #    yield f"[Stream stopped due to: {chunk.prompt_feedback.block_reason}]"
-            #    break # Stop streaming if blocked
+        logger.info(f"Google API stream finished successfully for model: {model_id}.")
 
-        logger.info("Google API stream finished.")
+    except InvalidArgument as e:
+         logger.error(f"Google API Invalid Argument (check model ID '{model_id}' or prompt): {e}", exc_info=True)
+         raise
+    except GoogleAPICallError as e:
+         logger.error(f"Google API call error for model {model_id}: {e}", exc_info=True)
+         raise
+    except Exception as e:
+         logger.error(f"Unexpected error during Google streaming call for model {model_id}: {e}", exc_info=True)
+         raise
+
+
+def _call_groq_api_stream(api_key: str, model_id: str, prompt: str, gen_args: Dict[str, Any]) -> Generator[str, None, None]:
+    """Calls Groq API and yields streaming response chunks."""
+    # (Implementation from previous version - no changes needed here)
+    try:
+        client = Groq(api_key=api_key, timeout=config.LLM_API_TIMEOUT)
+        logger.info(f"Sending STREAMING request to Groq API (Model: {model_id})...")
+        stream = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=model_id,
+            max_tokens=gen_args.get("max_output_tokens"),
+            temperature=gen_args.get("temperature"),
+            stream=True,
+        )
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
+        logger.info(f"Groq API stream finished successfully for model: {model_id}.")
+
+    except GroqAPIError as e:
+        logger.error(f"Groq API Error (Status {getattr(e, 'status_code', 'N/A')}) for model {model_id}: {getattr(e, 'message', e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error during Groq streaming call for model {model_id}: {e}", exc_info=True)
+        raise
+
+# --- Main LLM Dispatcher Function (Streaming) ---
+def get_llm_response_stream(prompt: str, generation_args: Optional[Dict[str, Any]] = None) -> Generator[str, None, None]:
+    """
+    Gets a streaming response from the configured LLM provider and model sequence.
+    Iterates through providers defined in config.LLM_PROVIDER_ORDER and models within
+    each provider (e.g., LLM_GOOGLE_MODELS, LLM_GROQ_MODELS). Falls back on specific errors.
+
+    Args:
+        prompt: The text prompt to send to the LLM.
+        generation_args: Optional dictionary of additional arguments for the API call.
+                         These are passed to the provider-specific call functions.
+
+    Yields:
+        str: Chunks of text from the LLM response. Yields error messages if failures occur.
+    """
+    llm_attempts = _get_llm_attempts()
+    if not llm_attempts:
+        yield "[Error: No available LLM attempts configured (check config.py and .env)]"
+        return
+
+    last_exception = None
+    stream_successful = False
+
+    # Prepare base generation args from config (can be overridden by generation_args)
+    base_gen_args = {
+        "max_output_tokens": config.LLM_MAX_NEW_TOKENS,
+        "temperature": config.LLM_TEMPERATURE
+    }
+    if generation_args:
+        base_gen_args.update(generation_args) # Merge/override with user args
+
+    for attempt in llm_attempts:
+        provider = attempt["provider"]
+        model_id = attempt["model_id"]
+        api_key = attempt["api_key"]
+
+        # logger.info(f"Attempting LLM stream: Provider='{provider}', Model='{model_id}'") # Logged within specific call funcs now
+
+        try:
+            # Select the appropriate call function based on provider
+            if provider == "google":
+                response_generator = _call_google_api_stream(api_key, model_id, prompt, base_gen_args)
+            elif provider == "groq":
+                response_generator = _call_groq_api_stream(api_key, model_id, prompt, base_gen_args)
+            else:
+                # Should not happen if _get_llm_attempts filters correctly
+                logger.error(f"Unsupported provider '{provider}' encountered in attempt loop.")
+                last_exception = ValueError(f"Unsupported provider: {provider}")
+                continue # Try next attempt
+
+            # Consume the generator from the specific provider call
+            chunk_yielded = False
+            for chunk in response_generator:
+                yield chunk
+                chunk_yielded = True
+                stream_successful = True # Mark success if at least one chunk yields
+
+            # If we successfully yielded chunks, we are done.
+            if stream_successful:
+                return # Exit the main generator function successfully
+
+            # Handle case where stream finished without yielding (and didn't raise below)
+            if not chunk_yielded:
+                 logger.warning(f"Stream from {provider} model {model_id} finished without yielding text.")
+                 last_exception = ValueError(f"Empty stream from {provider} model {model_id}")
+                 # Continue to the next attempt
+
+        # --- Handle Specific Errors for Fallback ---
+        except (GoogleResourceExhausted, GroqRateLimitError) as e:
+            logger.warning(f"Rate limit hit for {provider} model {model_id}. Trying next attempt. Error: {type(e).__name__}")
+            last_exception = e
+            time.sleep(0.5) # Small delay before next attempt
+            continue # Move to the next attempt in the list
+
+        except ValueError as e: # Catch safety blocks or empty stream errors
+             if "blocked by safety filters" in str(e) or "Empty stream" in str(e):
+                  logger.warning(f"{str(e)} for {provider} model {model_id}. Trying next attempt.")
+                  last_exception = e
+                  continue # Move to the next attempt
+             else: # Re-raise other ValueErrors
+                  logger.error(f"ValueError during {provider} stream for model {model_id}: {e}", exc_info=True)
+                  last_exception = e
+                  break # Stop on unexpected ValueErrors
+
+        except (GoogleAPICallError, GroqAPIError, InvalidArgument) as e:
+             # Catch other API errors that likely won't be solved by switching models/providers
+             logger.error(f"API Error for {provider} model {model_id} that prevents fallback: {type(e).__name__}", exc_info=True)
+             last_exception = e
+             break # Stop attempts
+
+        except Exception as e:
+            # Catch any other unexpected errors during the provider call
+            logger.error(f"Unexpected error during {provider} stream for model {model_id}: {e}", exc_info=True)
+            last_exception = e
+            break # Stop attempts
+
+    # If loop completes without successfully returning
+    if not stream_successful:
+        logger.error(f"All LLM streaming attempts failed. Last error: {last_exception}")
+        yield f"[Error: All LLM attempts failed. Last error: {type(last_exception).__name__ if last_exception else 'N/A'}]"
+
+
+# --- Non-Streaming Function ---
+# Uses the updated streaming function internally
+def get_llm_response(prompt: str, generation_args: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """
+    Gets a standard, non-streaming response from the configured LLM provider sequence.
+    Uses the streaming function internally and collects the response.
+    Args:
+        prompt: The text prompt to send to the LLM.
+        generation_args: Optional dictionary of additional arguments for the API call.
+    Returns:
+        The LLM's response text as a string, or None if all attempts fail or errors occur.
+    """
+    # Removed redundant log message - detailed logging happens in get_llm_response_stream
+    # logger.info("Initiating non-streaming LLM request (will use streaming backend)...")
+    full_response_parts = []
+    error_occurred = False
+    try:
+        for chunk in get_llm_response_stream(prompt, generation_args):
+            if chunk.startswith("[Error:"):
+                logger.error(f"Error received from streaming backend: {chunk}")
+                error_occurred = True
+                # Stop collecting if a definitive error message is received
+                full_response_parts = [chunk] # Store only the error message
+                break
+            full_response_parts.append(chunk)
+
+        if error_occurred:
+             logger.error("Non-streaming call failed due to errors in the stream.")
+             return None # Return None on error
+        elif not full_response_parts:
+             logger.warning("Non-streaming call resulted in empty response from stream.")
+             return None # Or "" depending on desired behavior
+        else:
+             final_response = "".join(full_response_parts).strip()
+             logger.info("Non-streaming LLM request completed successfully.")
+             return final_response
 
     except Exception as e:
-        logger.error(f"Error during Gemini streaming API call: {e}", exc_info=True)
-        # Yield an error message then stop
-        yield f"[Error generating streaming response: {e}]"
-        # Optionally re-raise if the caller should handle it more directly
-        # raise e
+        # Catch any unexpected errors during stream consumption
+        logger.error(f"Unexpected error consuming LLM stream for non-streaming response: {e}", exc_info=True)
+        return None
