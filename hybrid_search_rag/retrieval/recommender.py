@@ -13,10 +13,7 @@ import ssl # For handling potential SSL issues during NLTK download
 from nltk.corpus import stopwords
 import string # For punctuation removal
 import sys # For printing download errors to stderr
-
-# Import the configured EmbeddingModel implementation
-from .embedding_model_gemini import EmbeddingModel # Assumes Gemini is the configured model
-
+from .embedding_model_gemini import EmbeddingModel # Embedding Model implementation
 
 @dataclass
 class RecommendationParams:
@@ -31,9 +28,8 @@ logger = logging.getLogger(__name__)
 class NltkManager:
     """Manages NLTK data and tokenization."""
     NLTK_STOPWORDS: Optional[set] = None
-    # Class variable to track data availability across instances/calls
     NLTK_DATA_AVAILABLE: Dict[str, bool] = {'punkt': False, 'stopwords': False}
-    _nltk_checked_init = False # Flag to ensure init check runs only once per process
+    _nltk_checked_init = False
 
     def __init__(self):
         """Initialize and ensure NLTK data is checked at least once."""
@@ -46,17 +42,16 @@ class NltkManager:
         """Checks and potentially downloads NLTK data required for tokenization."""
         data_to_check = {'punkt': 'tokenizers/punkt', 'stopwords': 'corpora/stopwords'}
         needs_download = []
-        initial_availability = cls.NLTK_DATA_AVAILABLE.copy() # Store initial state
+        initial_availability = cls.NLTK_DATA_AVAILABLE.copy()
 
         logger.info("Performing NLTK data check...")
         for name, path in data_to_check.items():
             try:
                 nltk.data.find(path)
                 cls.NLTK_DATA_AVAILABLE[name] = True
-                # logger.debug(f"NLTK data '{name}' found.") # Can be verbose
             except LookupError:
                 cls.NLTK_DATA_AVAILABLE[name] = False
-                if name not in needs_download: # Avoid duplicate download attempts
+                if name not in needs_download:
                     needs_download.append(name)
                     logger.warning(f"NLTK data '{name}' not found. Will attempt download.")
 
@@ -64,17 +59,15 @@ class NltkManager:
             logger.info(f"Attempting to download missing NLTK data: {', '.join(needs_download)}...")
             download_success_flags = {}
             try:
-                # Attempt to bypass SSL verification if needed
                 try:
                     _create_unverified_https_context = ssl._create_unverified_context
                 except AttributeError: pass
                 else: ssl._create_default_https_context = _create_unverified_https_context
 
                 for name in needs_download:
-                    print(f"Downloading NLTK package: {name}...", file=sys.stderr) # Print for visibility
-                    if nltk.download(name, quiet=True): # Use quiet=True for less console noise
+                    print(f"Downloading NLTK package: {name}...", file=sys.stderr)
+                    if nltk.download(name, quiet=True):
                         logger.info(f"Successfully downloaded NLTK data '{name}'.")
-                        # Verify immediately
                         try:
                             nltk.data.find(data_to_check[name])
                             cls.NLTK_DATA_AVAILABLE[name] = True
@@ -90,9 +83,8 @@ class NltkManager:
 
             except Exception as e:
                 logger.error(f"NLTK download process failed: {e}", exc_info=True)
-                # Mark all attempted downloads as failed on general error
                 for name in needs_download:
-                     if name not in download_success_flags: # Only if not already marked
+                     if name not in download_success_flags:
                           cls.NLTK_DATA_AVAILABLE[name] = False
 
             # Report failures
@@ -103,8 +95,7 @@ class NltkManager:
                  # Optionally raise SystemExit here if data is absolutely critical
                  # raise SystemExit(f"Failed to download NLTK data: {failed_downloads}")
 
-        # Load stopwords if available (check flag again after potential download)
-        if cls.NLTK_DATA_AVAILABLE['stopwords'] and cls.NLTK_STOPWORDS is None: # Load only once
+        if cls.NLTK_DATA_AVAILABLE['stopwords'] and cls.NLTK_STOPWORDS is None:
             try:
                 cls.NLTK_STOPWORDS = set(stopwords.words('english'))
                 logger.info(f"Loaded {len(cls.NLTK_STOPWORDS)} NLTK English stopwords.")
@@ -113,7 +104,7 @@ class NltkManager:
                 cls.NLTK_STOPWORDS = set()
         elif not cls.NLTK_DATA_AVAILABLE['stopwords'] and initial_availability['stopwords']:
              logger.warning("NLTK stopwords became unavailable. Using empty list.")
-             cls.NLTK_STOPWORDS = set() # Reset if it becomes unavailable
+             cls.NLTK_STOPWORDS = set()
 
 
     @classmethod
@@ -125,18 +116,14 @@ class NltkManager:
             logger.warning("Attempted to tokenize non-string input.")
             return []
 
-        # --- FIXED: Just-in-time check for 'punkt' ---
         if not cls.NLTK_DATA_AVAILABLE['punkt']:
             logger.warning("NLTK 'punkt' flag is False. Re-checking data...")
-            cls._check_and_load_nltk_data() # Attempt to load again
-        # --- End Fix ---
+            cls._check_and_load_nltk_data()
 
-        # Proceed only if 'punkt' is now available
         if not cls.NLTK_DATA_AVAILABLE['punkt']:
             logger.error("NLTK 'punkt' data unavailable after check! Cannot tokenize.")
-            return [] # Return empty list if still unavailable
+            return []
 
-        # Also ensure stopwords are loaded if needed (check might have loaded them)
         if remove_stopwords and cls.NLTK_STOPWORDS is None:
              if cls.NLTK_DATA_AVAILABLE['stopwords']:
                   logger.warning("Stopwords data available but not loaded. Attempting load.")
@@ -144,17 +131,16 @@ class NltkManager:
                        cls.NLTK_STOPWORDS = set(stopwords.words('english'))
                   except Exception:
                        logger.error("Failed to load stopwords during tokenization.", exc_info=True)
-                       cls.NLTK_STOPWORDS = set() # Fallback
+                       cls.NLTK_STOPWORDS = set()
              else:
                   logger.warning("Stopwords requested but data unavailable. Proceeding without stopword removal.")
-                  cls.NLTK_STOPWORDS = set() # Ensure it's an empty set
-
+                  cls.NLTK_STOPWORDS = set() 
+                  
         try:
             text = text.lower()
             text = text.translate(str.maketrans('', '', string.punctuation))
-            tokens = nltk.word_tokenize(text) # This requires 'punkt'
+            tokens = nltk.word_tokenize(text)
             if remove_stopwords:
-                # Use the loaded stopwords (guaranteed to be a set, possibly empty)
                 tokens = [word for word in tokens if word not in cls.NLTK_STOPWORDS]
             return [word for word in tokens if len(word) >= min_word_length]
         except Exception as e:
@@ -167,17 +153,14 @@ class Recommender:
     def __init__(self, embed_model: EmbeddingModel):
         """Initializes with a pre-configured EmbeddingModel instance."""
         self.embed_model = embed_model
-        # NltkManager constructor now handles the initial check
         self.nltk_manager = NltkManager()
         logger.info(f"Recommender initialized with embedding model: {type(embed_model).__name__}")
 
-    # _validate_embeddings remains the same
     def _validate_embeddings(self, query_embedding: Optional[np.ndarray], resource_embeddings: Optional[np.ndarray]) -> bool:
         """Helper function to validate embeddings for semantic search."""
         if resource_embeddings is None or query_embedding is None or query_embedding.size == 0 or resource_embeddings.size == 0:
             return False
 
-        # Ensure query embedding is 2D (1, embedding_dim)
         query_embedding_2d = query_embedding.reshape(1, -1) if query_embedding.ndim == 1 else query_embedding
         if query_embedding_2d.ndim != 2 or query_embedding_2d.shape[0] != 1:
             logger.error(f"Invalid query embedding shape: {query_embedding.shape}. Aborting semantic search.", exc_info=True)
@@ -187,7 +170,6 @@ class Recommender:
             return False
         return True
 
-    # _validate_keyword_search_inputs remains the same
     def _validate_keyword_search_inputs(self, query: str, bm25_index: Optional[BM25Okapi]) -> Tuple[bool, List[str]]:
         """Helper function to validate inputs for keyword search."""
         if bm25_index is None:
@@ -199,7 +181,6 @@ class Recommender:
             return False, []
         return True, tokenized_query
 
-    # _semantic_search remains the same
     def _semantic_search(self, query_embedding: Optional[np.ndarray], resource_embeddings: Optional[np.ndarray], top_n: int) -> List[Tuple[int, float]]:
         """Performs semantic search using cosine similarity."""
         if not self._validate_embeddings(query_embedding, resource_embeddings):
@@ -224,15 +205,11 @@ class Recommender:
              logger.error(f"Error during semantic search: {e}", exc_info=True)
              return []
 
-    # _keyword_search remains the same
     def _keyword_search(self, query: str, bm25_index: Optional[BM25Okapi], num_docs_in_corpus: int, top_n: int) -> List[Tuple[int, float]]:
         """Performs keyword search using the BM25 index."""
         valid_inputs, tokenized_query = self._validate_keyword_search_inputs(query, bm25_index)
         if not valid_inputs: return []
         try:
-
-
-            # Get BM25 scores for the query against all documents
             doc_scores = bm25_index.get_scores(tokenized_query)
 
             # Find top N indices efficiently using argpartition
@@ -260,8 +237,8 @@ class Recommender:
         for rank_list in ranked_lists:
             if not rank_list: continue
             seen_indices_in_list = set()
-            for rank, (doc_index, _) in enumerate(rank_list): # rank starts at 0
-                 if isinstance(doc_index, (int, np.integer)) and doc_index >= 0: # add test to check doc_index >0
+            for rank, (doc_index, _) in enumerate(rank_list):
+                 if isinstance(doc_index, (int, np.integer)) and doc_index >= 0:
                       doc_index_int = int(doc_index)
                       if doc_index_int not in seen_indices_in_list:
                            # RRF Formula: score += 1 / (k + rank + 1)
@@ -272,7 +249,6 @@ class Recommender:
         # logger.debug(f"Fusion generated {len(fused_scores)} scores.") # Debug level
         return fused_scores
 
-    # recommend method remains the same
     def recommend(self,
                   query: str,
                   resource_metadata: List[Dict[str, Any]],
@@ -292,7 +268,6 @@ class Recommender:
         query_embedding: Optional[np.ndarray] = None
         # logger.debug(f"Encoding query (task_type='RETRIEVAL_QUERY').") # Debug level
         try:
-            # Use 'RETRIEVAL_QUERY' task type for optimal query embeddings
             query_embedding = self.embed_model.encode(query, task_type="RETRIEVAL_QUERY")
             if query_embedding is None or query_embedding.size == 0:
                 logger.warning("Query encoding failed or resulted in empty vector. Semantic search disabled.")
@@ -331,8 +306,8 @@ class Recommender:
         # logger.info(f"Retrieving metadata for top {top_n_final} results...") # Can be verbose
         final_results: List[Tuple[Dict[str, Any], float]] = []
         for rank, idx in enumerate(sorted_fused_indices):
-            if len(final_results) >= params.top_n_final: break # Stop once we have enough
-            if 0 <= idx < num_docs: # Check index validity
+            if len(final_results) >= params.top_n_final: break
+            if 0 <= idx < num_docs:
                 try:
                     metadata_item = resource_metadata[idx]
                     score = fused_scores[idx]

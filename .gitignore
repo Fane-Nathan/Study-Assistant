@@ -14,7 +14,9 @@ env/
 *.env
 
 # Data files (Uncomment if you don't want to track generated data in Git)
-# data_hybrid/
+data_hybrid/
+data/
+finetune/
 hold.txt
 
 # IDE settings
